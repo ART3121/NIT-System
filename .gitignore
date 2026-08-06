@@ -1,0 +1,5 @@
+/target/
+/dist/
+.notes
+.notes.archive
+.notes.legacy.*.bak
