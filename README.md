@@ -1,4 +1,17 @@
-# NIT System
+<p align="center">
+  <img src="assets/nit-system-banner.jpeg" alt="NIT System banner" width="900">
+</p>
+
+<h1 align="center">NIT System</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-2021-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust 2021">
+  <img src="https://img.shields.io/badge/Ratatui-0.29-569cd6?style=flat-square" alt="Ratatui 0.29">
+  <img src="https://img.shields.io/badge/Crossterm-0.28-4ec9b0?style=flat-square" alt="Crossterm 0.28">
+  <img src="https://img.shields.io/badge/Platform-Linux%20x86--64-f44747?style=flat-square&logo=linux&logoColor=white" alt="Linux x86-64">
+  <img src="https://img.shields.io/badge/Storage-Markdown-c586c0?style=flat-square&logo=markdown&logoColor=white" alt="Markdown storage">
+  <a href="https://github.com/ART3121/NIT-System/releases/latest"><img src="https://img.shields.io/github/v/release/ART3121/NIT-System?style=flat-square&color=dcdcaa" alt="Latest release"></a>
+</p>
 
 NIT System is a fast, local-first note and task manager for the terminal. It is designed for immediate capture, keyboard-driven organization, and plain-text ownership.
 
@@ -55,6 +68,7 @@ NIT is not intended to prescribe a complete productivity methodology. It is a sm
 - [Archiving and deletion](#archiving-and-deletion)
 - [Importing notes](#importing-notes)
 - [Manual editing](#manual-editing)
+- [Brand assets](#brand-assets)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -506,6 +520,17 @@ Example of a multiline entry:
 Content outside recognized sections may be ignored and removed during the next canonical rewrite. Back up the file before experimenting with custom layouts.
 
 If a file is changed while the TUI is open, press `r` to reload it.
+
+## Brand assets
+
+The official banner and square icon are stored in the repository and can be reused when presenting or packaging NIT System.
+
+| Banner | Icon |
+|---|---|
+| <img src="assets/nit-system-banner.jpeg" alt="NIT System banner" width="560"> | <img src="assets/nit-system-icon.jpeg" alt="NIT System icon" width="220"> |
+
+- [`assets/nit-system-banner.jpeg`](assets/nit-system-banner.jpeg) — 1600×900 project banner.
+- [`assets/nit-system-icon.jpeg`](assets/nit-system-icon.jpeg) — 1254×1254 square icon.
 
 ## Architecture
 
