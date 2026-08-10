@@ -1,5 +1,8 @@
 /target/
 /dist/
+.nit/
 .notes
 .notes.archive
+.notes.legacy.bak
+.notes.archive.legacy.bak
 .notes.legacy.*.bak

@@ -10,122 +10,99 @@
   <img src="https://img.shields.io/badge/Crossterm-0.28-4ec9b0?style=flat-square" alt="Crossterm 0.28">
   <img src="https://img.shields.io/badge/Platform-Linux%20x86--64-f44747?style=flat-square&logo=linux&logoColor=white" alt="Linux x86-64">
   <img src="https://img.shields.io/badge/Storage-Markdown-c586c0?style=flat-square&logo=markdown&logoColor=white" alt="Markdown storage">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-dcdcaa?style=flat-square" alt="MIT License"></a>
   <a href="https://github.com/ART3121/NIT-System/releases/latest"><img src="https://img.shields.io/github/v/release/ART3121/NIT-System?style=flat-square&color=dcdcaa" alt="Latest release"></a>
 </p>
 
-NIT System is a fast, local-first note and task manager for the terminal. It is designed for immediate capture, keyboard-driven organization, and plain-text ownership.
+NIT System is a fast, local-first notes and task manager for the terminal. It combines immediate command-line capture, a keyboard-driven TUI, readable IDs, directory-scoped workspaces, and optional local AI Roadmaps.
 
-The name represents the system's three primary concepts:
+The name represents the three primary concepts:
 
 - **N**otes
 - **I**deas
 - **T**o-dos
 
-**Items** are also supported as an additional entry type, but they are not part of the NIT acronym.
+**Items** are available as an additional entry type for resources and references.
 
-NIT stores data in human-readable Markdown files. It requires no account, database, synchronization service, or background process.
+NIT stores its data in ordinary text files. It requires no account, database, synchronization service, or NIT background process.
 
 ## Philosophy
 
 NIT is built around a simple principle: a note system should reduce the distance between having a thought and preserving it.
 
-Many note-taking workflows gradually become systems that must be maintained. They introduce templates, dashboards, notifications, complex hierarchies, and organizational rules that can demand more attention than the information itself. NIT takes the opposite approach. It provides just enough structure to make entries useful while keeping capture immediate.
+The system provides enough structure to make entries useful without turning organization into a separate maintenance task:
 
-The system follows a few core ideas:
+- **Capture should become muscle memory.** A complete entry can be stored with one short command.
+- **Structure should remain lightweight.** Types describe what an entry is; horizons describe when an Idea or To-do matters.
+- **Commands should not compete with natural language.** Operations begin with `-`, so ordinary words remain valid entry text.
+- **IDs should remain readable.** Entries use classification-based IDs instead of opaque random identifiers.
+- **Archiving should remain neutral.** Moving an entry out of the active view does not force it into a universal “done” state.
+- **Workspace boundaries should follow context.** Independent directories can keep unrelated collections separate.
+- **Data ownership comes first.** Storage remains local, readable, portable, and manually editable.
+- **AI should remain optional.** Local generation assists an entry without becoming required for capture, storage, or navigation.
 
-- **Capture should become muscle memory.** A thought can be stored with one short command, without opening a workspace or navigating menus.
-- **Organization should remain lightweight.** Types describe what an entry is, while horizons describe when it matters. This avoids deep folder trees and elaborate taxonomies.
-- **Uncertainty is acceptable.** An entry does not need a perfect classification before it can be saved. Capture codes are optional, and an unclassified entry falls back to a short-term to-do.
-- **Archived does not mean completed.** Ideas, notes, items, and to-dos can all leave the active view without being forced into a universal “done” state.
-- **The user owns the data.** Notes remain local, readable, portable, and editable without NIT.
-- **The interface should stay out of the way.** The direct CLI is optimized for capture, the TUI for review and maintenance, and an external editor for longer changes.
-
-NIT is not intended to prescribe a complete productivity methodology. It is a small foundation that can adapt to different workflows without becoming another workflow to manage.
+NIT is a small foundation rather than a prescribed productivity methodology.
 
 ## Features
 
-- Capture entries directly from the command line without quotes.
-- Organize entries by type and time horizon.
-- Browse and manage entries through a keyboard-driven TUI.
-- Automatically scroll through collections larger than the terminal window.
-- Archive and restore entries without treating them as completed tasks.
-- Edit entries with Neovim, Vim, Vi, or Nano.
-- Keep active and archived data in portable Markdown files.
-- Import existing files that follow the supported heading structure.
-- Run as a small standalone binary; Rust is only required to build from source.
+- Capture entries without quoting the text.
+- Classify Ideas and To-dos by short, medium, or long horizon.
+- Keep Notes and Items timeless.
+- Address entries with IDs such as `ST-0001`, `LI-0003`, `N-0001`, and `X-0001`.
+- Discover the nearest `.nit/` workspace from nested directories.
+- Browse, filter, edit, archive, restore, and delete through the TUI.
+- Wrap long content and scroll collections larger than the terminal.
+- Edit with Neovim, Vim, Vi, or Nano.
+- Import compatible Markdown collections.
+- Generate optional Roadmaps through a local Ollama model.
+- Run from a standalone release binary; Rust is required only when building from source.
 
-## Table of contents
+## Contents
 
-- [Philosophy](#philosophy)
-- [Core concepts](#core-concepts)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Directory-scoped workspaces](#directory-scoped-workspaces)
+- [Core concepts](#core-concepts)
+- [Workspaces](#workspaces)
 - [Fast capture](#fast-capture)
 - [Command reference](#command-reference)
 - [Terminal interface](#terminal-interface)
-- [Storage](#storage)
-- [Archiving and deletion](#archiving-and-deletion)
-- [Importing notes](#importing-notes)
-- [Manual editing](#manual-editing)
-- [Brand assets](#brand-assets)
+- [Local AI Roadmaps](#local-ai-roadmaps)
+- [Storage format](#storage-format)
+- [Legacy migration](#legacy-migration)
+- [Importing and manual editing](#importing-and-manual-editing)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
-
-## Core concepts
-
-Every entry has a **type** and a **time horizon**.
-
-### Entry types
-
-| Type | Code | Suggested use |
-|---|---:|---|
-| Idea | `i` | Possibilities, hypotheses, and early project concepts |
-| Note | `n` | Knowledge, context, observations, and reference text |
-| Item | `x` | Links, tools, people, books, and other resources |
-| To-do | `t` | Actions that need to be performed |
-
-### Time horizons
-
-| Horizon | Code | Suggested use |
-|---|---:|---|
-| Short | `s` | Immediate or near-term entries |
-| Medium | `m` | Entries to revisit after current priorities |
-| Long | `l` | Long-term goals, plans, and references |
-
-A capture code combines the horizon first and the type second. For example, `-st` means a short-term to-do, `-mn` means a medium-term note, and `-li` means a long-term idea.
+- [License](#license)
 
 ## Installation
 
 ### Prebuilt release
 
-Install the latest release with one command:
+Install the latest Linux x86-64 release:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/ART3121/NIT-System/releases/latest/download/install.sh | sh
 ```
 
-The installer detects the supported platform, downloads the prebuilt binary, verifies its SHA-256 checksum, and installs it to `~/.local/bin/nit`. It does not require Rust or administrator privileges.
+The installer downloads the release archive, verifies its SHA-256 checksum, and installs `nit` to `~/.local/bin`. Rust, Cargo, and administrator privileges are not required.
 
-Ensure `~/.local/bin` is included in `PATH`:
+If necessary, add the installation directory to `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Release binaries do not require Rust or Cargo.
-
-To install a specific version or use another destination:
+Install a specific version or select another destination:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/ART3121/NIT-System/releases/latest/download/install.sh | \
-  NIT_VERSION=0.1.0 NIT_INSTALL_DIR="$HOME/bin" sh
+  NIT_VERSION=0.2.0 NIT_INSTALL_DIR="$HOME/bin" sh
 ```
 
-To uninstall a release installation:
+Remove a release installation:
 
 ```bash
 rm "$HOME/.local/bin/nit"
@@ -136,243 +113,296 @@ rm "$HOME/.local/bin/nit"
 Requirements:
 
 - Rust and Cargo;
-- at least one supported terminal editor: Neovim, Vim, Vi, or Nano;
-- a terminal with RGB color support for the complete TUI theme.
+- a supported terminal editor for editor-based actions;
+- a terminal with color support for the complete TUI theme.
 
-Clone the repository, enter its directory, and run:
+Build and install the current source:
 
 ```bash
+git clone https://github.com/ART3121/NIT-System.git
+cd NIT-System
 cargo install --path .
 ```
 
-Cargo normally installs the executable at `~/.cargo/bin/nit`. If the command is not found, add that directory to `PATH`:
+Cargo normally installs the executable to `~/.cargo/bin/nit`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-To reinstall after updating the source:
+Reinstall after updating the source:
 
 ```bash
 cargo install --path . --force
 ```
 
-To uninstall:
-
-```bash
-cargo uninstall nit-system
-```
-
 ## Quick start
 
-Open the terminal interface in the current directory:
+Create a directory-scoped workspace:
 
 ```bash
-nit
+mkdir example-project
+cd example-project
+nit -init
 ```
 
-Capture an entry immediately:
+Capture entries immediately:
 
 ```bash
 nit Review the deployment checklist -st
+nit Record the service boundaries -n
+nit Explore an event-driven design -mi
 ```
 
 List active entries:
 
 ```bash
-nit list
+nit -list
 ```
 
-NIT uses the current working directory as its workspace. Running it in different directories creates independent collections:
-
-```text
-project-a/.notes
-project-b/.notes
-```
-
-Run NIT from the same directory whenever you want to access that collection.
-
-## Directory-scoped workspaces
-
-NIT does not force every entry into one global database. The current working directory defines the active workspace, allowing unrelated parts of life and work to remain separate without accounts, profiles, or configuration files.
-
-### General notes in the home directory
-
-Run NIT from the home directory to maintain a general-purpose collection:
+Open the terminal interface:
 
 ```bash
-cd "$HOME"
-nit Buy a replacement keyboard -st
-nit Save an article about personal finance -sx
+nit
 ```
 
-These entries are stored in `$HOME/.notes`. This workspace is useful for everyday ideas, reminders, shopping items, personal references, and anything that does not belong to a specific project.
-
-### Project-specific notes
-
-Run NIT from the root of a project or repository to create an isolated collection for that context:
-
-```bash
-cd "$HOME/projects/example-project"
-nit Add retry handling to the API client -st
-nit Consider a plugin-based architecture -mi
-```
-
-The project now has its own files:
+Initialization creates:
 
 ```text
 example-project/
-├── .notes
-├── .notes.archive
-└── project files...
+└── .nit/
+    ├── notes
+    ├── archive
+    └── next-ids
 ```
 
-Implementation ideas, technical references, open questions, and project tasks stay close to the work they describe instead of being mixed with general notes. Changing directories naturally changes context:
+Commands executed from a nested directory continue using the nearest workspace:
+
+```bash
+mkdir -p src/parser
+cd src/parser
+nit -list
+```
+
+## Core concepts
+
+Every entry has a type. Ideas and To-dos also have a time horizon; Notes and Items are intentionally timeless.
+
+### Entry types
+
+| Type | Code | Intended role |
+|---|---:|---|
+| Idea | `i` | Possibilities, hypotheses, and concepts to explore |
+| Note | `n` | Knowledge, context, observations, and reference text |
+| Item | `x` | Links, tools, books, components, and other resources |
+| To-do | `t` | Concrete actions that need to be performed |
+
+### Time horizons
+
+| Horizon | Code | Intended role |
+|---|---:|---|
+| Short | `s` | Current or near-term Ideas and To-dos |
+| Medium | `m` | Entries to revisit after current priorities |
+| Long | `l` | Future Ideas and long-term actions |
+
+Temporal capture codes place the horizon before the type:
 
 ```text
-$HOME/.notes                          # general and personal context
-$HOME/projects/example-project/.notes # project context
-$HOME/projects/another-project/.notes # another independent context
+-st  short To-do
+-mi  medium Idea
+-li  long Idea
 ```
 
-Run NIT from the project root consistently. Running it from a nested directory creates another independent `.notes` file in that directory.
+Timeless types use a single type code:
 
-### Private or shared project notes
-
-For private project notes, add the storage files to the project's `.gitignore`:
-
-```gitignore
-.notes
-.notes.archive
-.notes.legacy.*.bak
+```text
+-n   Note
+-x   Item
 ```
 
-Alternatively, the Markdown files can be committed when a team intentionally wants to share project context through the repository. NIT does not impose either policy; each workspace can be private or version-controlled independently.
+### Entry IDs
+
+Every new entry receives an ID derived from its classification:
+
+```text
+SI-0001  Short Idea
+MI-0001  Medium Idea
+LI-0001  Long Idea
+N-0001   Note
+X-0001   Item
+ST-0001  Short To-do
+MT-0001  Medium To-do
+LT-0001  Long To-do
+```
+
+Each classification has an independent numeric sequence. Four digits are the minimum padding; numbering continues naturally beyond `9999`. IDs are case-insensitive, and shorter numeric input is accepted:
+
+```bash
+nit -show ST-0001
+nit -show st-1
+nit -edit LI-0003
+nit -archive N-0012
+```
+
+Editing, archiving, and restoring preserve the ID. Deleted numbers are not reused. Commands that accept a query prioritize an ID before searching entry text.
+
+## Workspaces
+
+A `.nit/` directory is the official boundary of a NIT workspace. It keeps one collection independent from collections stored in other directory trees.
+
+### Hierarchical discovery
+
+NIT begins at the current directory and searches each parent directory for `.nit/`. The first valid `.nit/` directory wins:
+
+```text
+project/                  ← workspace root
+├── .nit/
+└── src/
+    └── parser/           ← command executed here
+```
+
+This allows capture, listing, and the TUI to work from any nested path. Nested workspaces are supported; the nearest one always takes precedence. NIT never creates a workspace implicitly.
+
+Inspect the workspace selected for the current directory:
+
+```bash
+nit -root
+nit -path
+nit -status
+```
+
+`-root` and `-path` print only a path, making them suitable for scripts.
+
+### Workspace scopes
+
+Create separate workspaces wherever independent context is useful. For example, a repository can contain its own project entries while another directory tree maintains a separate collection:
+
+```text
+workspace-a/.nit/notes
+workspace-b/.nit/notes
+```
+
+No global database connects these collections, and changing directory naturally selects the applicable context.
+
+### Private and tracked workspaces
+
+Create a workspace and append `.nit/` to `.gitignore`:
+
+```bash
+nit -init --private
+```
+
+The existing `.gitignore` content is preserved and the rule is not duplicated. A Git repository is not required.
+
+Create a workspace without changing `.gitignore`:
+
+```bash
+nit -init --tracked
+```
+
+Tracked mode allows `.nit/` to remain available for version control. If `.nit/` already appears to be ignored, NIT reports a warning without modifying the file. Git integration is optional; NIT does not implement synchronization.
 
 ## Fast capture
 
-The fastest input format is:
+Capture syntax is intentionally direct:
 
 ```text
-nit <text> -<horizon><type>
+nit <text> -<horizon><type>  # Idea or To-do
+nit <text> -<type>           # Note or Item
 ```
 
 Examples:
 
 ```bash
 nit Explore a new caching strategy -si
-nit Summary of the architecture meeting -mn
-nit Kubernetes documentation -mx
-nit Learn container orchestration -lt
+nit Summary of the architecture meeting -n
+nit Container runtime documentation -x
+nit Review the release process -lt
 ```
 
-All supported codes:
+Supported codes:
 
-| Horizon | Idea | Note | Item | To-do |
+| Type | Short | Medium | Long | Timeless |
 |---|---:|---:|---:|---:|
-| Short | `-si` | `-sn` | `-sx` | `-st` |
-| Medium | `-mi` | `-mn` | `-mx` | `-mt` |
-| Long | `-li` | `-ln` | `-lx` | `-lt` |
+| Idea | `-si` | `-mi` | `-li` | — |
+| Note | — | — | — | `-n` |
+| Item | — | — | — | `-x` |
+| To-do | `-st` | `-mt` | `-lt` | — |
 
-Quotes are not required. NIT joins everything before the final capture code into one entry. If no code is supplied, the entry defaults to a short-term to-do:
+Quotes are unnecessary. NIT joins every argument before the final classification code into one entry. Missing or unknown codes are rejected.
+
+Operation names always begin with `-`. Ordinary words such as `list`, `show`, `edit`, and `archive` therefore remain valid entry text:
 
 ```bash
-nit Buy coffee
+nit list of parser improvements -n
+nit show the prototype during review -st
 ```
 
-An unknown three-character code produces an error with the accepted values.
+Use `nit -list` and `nit -show` to invoke those operations.
 
 ## Command reference
 
-### Open the TUI
+### Workspace commands
+
+| Command | Description |
+|---|---|
+| `nit -init` | Create `.nit/notes`, `.nit/archive`, and `.nit/next-ids` |
+| `nit -init --private` | Create a workspace and add `.nit/` to `.gitignore` |
+| `nit -init --tracked` | Create a workspace without changing `.gitignore` |
+| `nit -root` | Print the discovered workspace root |
+| `nit -path` | Print the discovered `.nit` directory |
+| `nit -status` | Show workspace paths and entry counts |
+| `nit -migrate` | Migrate legacy `.notes` storage explicitly |
+| `nit -assign-ids` | Assign IDs to imported or legacy entries that lack them |
+| `nit -migrate-timeless` | Convert legacy timed Note and Item IDs safely |
+
+Initialization never overwrites an existing workspace file.
+
+### Entry commands
+
+| Command | Description |
+|---|---|
+| `nit -list [code] [--archived]` | List and optionally filter a collection |
+| `nit -show <ID or text> [--archived]` | Display one matching entry |
+| `nit -edit <ID or text> [--archived]` | Edit one matching entry |
+| `nit -archive <ID or text>` | Move an active entry to the archive |
+| `nit -import <path>` | Import a compatible notes file |
+| `nit -ai-roadmap <ID>` | Generate and review a local AI Roadmap |
+
+Examples:
 
 ```bash
-nit
-nit tui
+nit -list -li
+nit -list -n --archived
+nit -show ST-0001
+nit -edit architecture boundaries
+nit -archive N-0004
+nit -import path/to/notes.md
 ```
 
-### Create entries with explicit subcommands
+Text lookup first checks for a case-insensitive exact match and then searches for a fragment. Ambiguous queries are rejected instead of selecting an entry silently.
 
-```bash
-nit idea long Explore event-driven architecture
-nit note medium Meeting summary
-nit item short API documentation
-nit todo long Learn Kubernetes
-```
+### Application commands
 
-The optional horizon is one of `short`, `medium`, or `long`. Fast capture codes are recommended for everyday use.
-
-### List entries
-
-```bash
-nit list
-nit list idea
-nit list idea long
-nit list --archived
-nit list todo short --archived
-```
-
-The output uses the same structured Markdown format as the storage files.
-
-### Show an entry
-
-```bash
-nit show deployment checklist
-nit show Kubernetes --archived
-```
-
-NIT first looks for a case-insensitive exact match. If no exact match exists, it searches for a text fragment. The query must identify exactly one entry.
-
-### Edit an entry
-
-```bash
-nit edit deployment checklist
-nit edit Kubernetes --archived
-```
-
-NIT starts the first available editor in this order:
-
-```text
-nvim → vim → vi → nano
-```
-
-Save and close the editor to update the entry. Empty content is rejected.
-
-### Archive an entry
-
-```bash
-nit archive Buy coffee
-```
-
-The entry is moved from `.notes` to `.notes.archive`. Any entry type can be archived.
-
-### Import a file
-
-```bash
-nit import path/to/notes.md
-```
-
-See [Importing notes](#importing-notes) for the accepted structure and backup behavior.
-
-### Display help and version information
-
-```bash
-nit --help
-nit --version
-nit list --help
-```
+| Command | Description |
+|---|---|
+| `nit` | Open the TUI |
+| `nit -tui` | Open the TUI explicitly |
+| `nit -help` | Display CLI help |
+| `nit -version` | Display the installed version |
 
 ## Terminal interface
 
-Run `nit` without arguments to open the TUI. The interface includes:
+Run `nit` without arguments. The TUI contains:
 
-- a header showing the active filters and current view;
-- an **Entries** column with type-based colors and the current position;
-- a synchronized **Class** column showing `horizon/type`;
-- a **Selected** panel with the full entry text;
-- a command and status line at the bottom.
+- a header with entry count, filters, and active/archive view;
+- an **Entries** area with type-based colors and automatic scrolling;
+- a synchronized right-side **ID** column;
+- a **Selected** area with the complete selected entry;
+- a bottom command area when command mode is active;
+- a gray bottom border with the red `[H]Help` indicator in the lower-right corner.
 
-When the number of entries exceeds the available height, the list scrolls automatically to keep the current selection visible. The **Entries** and **Class** columns always use the same scroll offset.
+Long text wraps in **Entries**, **Selected**, and command mode. Wrapped entry rows remain aligned with their IDs. When the collection exceeds the available terminal height, scrolling keeps the selected entry visible.
 
 ### Navigation and filters
 
@@ -380,257 +410,444 @@ When the number of entries exceeds the available height, the list scrolls automa
 |---|---|
 | `↑` / `k` | Select the previous entry |
 | `↓` / `j` | Select the next entry |
+| `Enter` | Expand or collapse the selected Roadmap |
 | `1` | Show all entry types |
-| `2` | Show Ideas only |
-| `3` | Show Notes only |
-| `4` | Show Items only |
-| `5` | Show To-dos only |
+| `2` | Show Ideas |
+| `3` | Show Notes |
+| `4` | Show Items |
+| `5` | Show To-dos |
 | `h` | Show all horizons |
-| `s` | Show short-term entries |
-| `m` | Show medium-term entries |
-| `l` | Show long-term entries |
-| `r` | Reload the current storage file |
+| `s` | Show the short horizon |
+| `m` | Show the medium horizon |
+| `l` | Show the long horizon |
+| `v` | Switch between active and archived entries |
+| `r` | Reload the current collection from disk |
 
-### Command-line capture inside the TUI
-
-Press `:` and enter:
-
-```text
-:w New note -sn
-```
-
-Press `Enter` to save. The `w` prefix is required. If archived entries are currently displayed, the new entry is saved to the active collection and the TUI returns to the active view.
-
-While entering a command:
+### Selected-entry actions
 
 | Key | Action |
 |---|---|
-| `Enter` | Execute `:w` or `:q` |
-| `Backspace` | Delete the previous character |
-| `Esc` | Cancel the command line without closing NIT |
+| `c` | Create an entry through the external editor using the active filters |
+| `e` | Edit the selected entry through the external editor |
+| `a` | Archive the selected active entry |
+| `u` | Restore the selected archived entry and return to the active view |
+| `dd` | Permanently delete the selected entry |
 
-The TUI only exits through:
+Deletion requires two consecutive `d` presses. Any different key cancels the armed deletion. There is no automatic trash or recovery directory.
+
+When no type filter is active, `c` creates a short To-do. Note and Item creation remains timeless regardless of the horizon filter.
+
+The editor fallback order is:
+
+```text
+nvim → vim → vi → nano
+```
+
+### Help
+
+The shortcut list is hidden during normal use. Press uppercase `H` or click `[H]Help` in the lower-right corner to open it. Press `H` or `Esc` to close the Help window. Lowercase `h` remains the horizon-filter shortcut.
+
+### Command mode
+
+Press `:` to open command mode.
+
+Capture an entry:
+
+```text
+:w New note -n
+```
+
+Exit the application safely:
 
 ```text
 :q
 ```
 
-Pressing `q` by itself or pressing `Esc` outside the command line does not close the application.
-
-### Actions on the selected entry
+Available input controls:
 
 | Key | Action |
 |---|---|
-| `Enter` / `e` | Edit the selected entry |
-| `c` | Create an entry in the external editor using the active filters |
-| `a` | Archive the selected active entry |
-| `v` | Switch between active and archived entries |
-| `u` | Restore the selected archived entry and return to the active view |
-| `dd` | Permanently delete the selected entry |
+| `Enter` | Execute the current command |
+| `Backspace` | Delete the previous character |
+| `Esc` | Cancel command mode without closing NIT |
+| `Ctrl+C` | Exit safely |
 
-When no filters are active, `c` creates a short-term to-do. Permanent deletion requires pressing `d` twice. Any different key between those presses cancels deletion.
+`Esc` outside a dialog or command mode does not exit the TUI. Modified keys do not trigger ordinary single-key actions, and only key-press events are processed.
 
-## Storage
+### AI action panel
 
-NIT keeps two hidden files in the directory where it runs:
+Press `i` to open the AI panel on the right. Use `↑`/`↓` or `j`/`k` to select an action and press `Enter` to run it. Press `i` or `Esc` to close the panel.
 
-```text
-.notes           # active entries
-.notes.archive   # archived entries
+`Generate Roadmap` is currently available. Additional operations are displayed as disabled previews and do not execute.
+
+Generation runs in the background while the TUI displays the current stage, a spinner, and elapsed time. When the proposal is ready:
+
+- press `Y` to accept and attach it;
+- press `N` or `Esc` to reject it without changing storage;
+- use `↑` and `↓` to scroll the proposal.
+
+## Local AI Roadmaps
+
+AI support is optional. Standard capture, search, editing, workspace discovery, and storage never require Ollama.
+
+NIT can ask a local Ollama model to transform an active entry into a short, ordered Roadmap. Generated steps remain attached to the original entry as readable Markdown.
+
+### Requirements
+
+- Ollama installed and available in `PATH`;
+- the configured model available locally or permission to download it;
+- a local Ollama HTTP endpoint.
+
+Generate from the CLI:
+
+```bash
+nit -ai-roadmap LI-0001
 ```
 
-Both files are ordinary Markdown and remain readable without NIT. NIT writes canonical English headings and continues to recognize localized legacy headings when reading older files. A supported document can look like this:
+The default model is `qwen3:1.7b`. Select another compatible local model with:
+
+```bash
+NIT_AI_MODEL=your-model nit -ai-roadmap LI-0001
+```
+
+Runtime characteristics depend on the selected model, Ollama configuration, and execution environment. Benchmark the intended deployment environment when performance comparisons are required.
+
+### Behavior
+
+- Only the selected entry's classification and text are used as task input.
+- Other workspace entries and previous generations are not sent as context.
+- Model reasoning output is disabled for this operation.
+- Responses use a structured schema and are validated before display.
+- A Roadmap contains four or five ordered steps with execution guidance, rationale, and an observable completion condition.
+- The model may remain loaded briefly after a request so nearby operations can reuse it; Ollama controls the eventual unload.
+- A generation has a finite timeout and can be cancelled safely.
+- Invalid, incomplete, or superficial output is rejected; one corrective generation may be attempted.
+- Workspace files remain unchanged until the proposal is accepted.
+- Existing Roadmaps are never replaced automatically.
+
+If the Ollama server is unavailable, NIT attempts to start the standard `ollama serve` process. NIT does not create its own resident AI service. If the model is missing, an interactive request asks before downloading it; non-interactive execution does not download automatically.
+
+The current Roadmap prompt requests Brazilian Portuguese output while preserving technical names from the source entry.
+
+### Development diagnostics
+
+Enable a compact metrics line on standard error:
+
+```bash
+NIT_AI_DEBUG=1 nit -ai-roadmap LI-0001
+```
+
+The metrics include prompt and output token counts, model load time, evaluation durations, total time, and generated tokens per second.
+
+Run the repeatable development workload with:
+
+```bash
+scripts/benchmark-ai.sh
+```
+
+The benchmark requires `curl`, `jq`, a running Ollama endpoint, and the configured model. It measures cold and warm requests with fixed representative inputs; benchmark results vary by environment and should be interpreted comparatively rather than as universal performance targets.
+
+## Storage format
+
+The workspace directory contains:
+
+```text
+.nit/
+├── notes      # active entries
+├── archive    # archived entries
+└── next-ids   # next sequence number for each classification
+```
+
+`notes` and `archive` are human-readable Markdown documents. NIT writes canonical English headings and recognizes supported legacy headings while reading older files.
+
+Example:
 
 ```markdown
 # NIT System
 
-## Short Term
+## Timeless
 
 ### Notes
-- Review the service boundaries
+- [N-0001] Review the service boundaries
+
+### Items
+- [X-0001] Container runtime documentation
+
+## Short Term
 
 ### To-dos
-- Complete the first prototype
+- [ST-0001] Complete the parser validation
 
 ## Long Term
 
 ### Ideas
-- Build a terminal-focused knowledge system
+- [LI-0001] Add a plugin interface
+  **Roadmap**
+  1. Inspect extension boundaries
+     Como fazer: Identify the components that can expose stable extension points.
 ```
 
-Empty sections are omitted. Entries retain their insertion order within each section. NIT writes to a temporary file before replacing the destination, reducing the chance of leaving partially written data.
+Empty sections are omitted. Entries preserve insertion order within each section. NIT writes through a temporary file before replacing a destination.
 
-The current format stores only the entry type, horizon, and text. It does not yet provide persistent IDs, timestamps, tags, due dates, or automatic synchronization.
+`next-ids` is also ordinary text:
 
-## Archiving and deletion
+```text
+# Next NIT entry IDs
+SI 1
+MI 1
+LI 2
+N 2
+X 2
+ST 2
+MT 1
+LT 1
+```
 
-Archiving does not delete data. It moves an entry to `.notes.archive`:
+NIT reconciles sequence counters with IDs in both active and archived collections before allocating a new ID. Do not lower these values manually; they also prevent deleted numbers from being reused.
+
+The current format does not include timestamps, tags, due dates, authorship, commit metadata, synchronization state, or a persistent configuration file.
+
+### Archiving and deletion
+
+Archiving moves an entry from `.nit/notes` to `.nit/archive` without marking it completed:
 
 ```bash
-nit list --archived
+nit -archive ST-0001
+nit -list --archived
 ```
 
-Inside the TUI, press `v` to view archived entries and `u` to restore the selected entry.
+The TUI restores archived entries with `u`. Permanent deletion is available only through `dd` in the TUI.
 
-Deletion with `dd` is permanent. NIT does not currently provide a trash directory or automatic recovery, so keep backups when storing important information.
+## Legacy migration
 
-## Importing notes
+### Migrating `.notes` files
+
+When no `.nit/` exists in the current directory or its parents, NIT checks only the current directory for:
+
+```text
+.notes
+.notes.archive
+```
+
+Legacy storage is never discovered in parent directories and never migrated automatically.
+
+Run migration from the directory containing the legacy files:
+
+```bash
+nit -migrate
+```
+
+Migration validates the source, copies it into a temporary workspace, reloads and compares the interpreted entries, and then installs `.nit/`. Existing workspace destinations are never overwritten.
+
+Original legacy files are preserved as backups when present:
+
+```text
+.notes.legacy.bak
+.notes.archive.legacy.bak
+```
+
+If only one legacy file exists, the missing collection is created as an empty canonical document. IDs are not assigned silently; use:
+
+```bash
+nit -assign-ids
+```
+
+Before assigning IDs, NIT creates `notes.pre-ids.bak` and `archive.pre-ids.bak` inside `.nit/`.
+
+### Migrating timed Note and Item IDs
+
+Older workspaces may contain Note and Item IDs such as `SN-0001`, `MN-0001`, or `LX-0001`. These remain readable, but allocation and movement operations require explicit conversion:
+
+```bash
+nit -migrate-timeless
+```
+
+The command converts only timed Note and Item IDs to the current `N-…` and `X-…` forms. Idea and To-do IDs remain unchanged. Before replacement, NIT creates:
+
+```text
+notes.pre-timeless.bak
+archive.pre-timeless.bak
+next-ids.pre-timeless.bak
+```
+
+## Importing and manual editing
+
+### Import
+
+Import a compatible file into the active collection:
+
+```bash
+nit -import /path/to/notes.md
+```
 
 The importer recognizes:
 
-- `Short`, `Medium`, and `Long Term` headings;
-- localized legacy horizon headings for backward compatibility;
-- `Ideas`, `Notes`, `Items`, and `To-do`/`To-dos` sections;
+- `Timeless`, `Short Term`, `Medium Term`, and `Long Term` sections;
+- supported localized legacy horizon headings;
+- `Ideas`, `Notes`, `Items`, and `To-do`/`To-dos` headings;
 - entries beginning with `- `;
-- continuation lines indented by at least two spaces.
+- continuation lines indented by at least two spaces;
+- supported entry IDs and Roadmap blocks.
 
-Import another file into the current collection:
+Entries without IDs receive new classification IDs. Unique current IDs are preserved. Conflicting IDs abort the import. Duplicate entry text is not removed automatically.
 
-```bash
-nit import /absolute/path/to/notes.md
-```
-
-When source and destination are different files, imported entries are appended to the current collection. Duplicate entries are not removed automatically.
-
-To normalize the current `.notes` file:
+Normalize the current active file through the parser and serializer:
 
 ```bash
-nit import .notes
+nit -import "$(nit -path)/notes"
 ```
 
-Before rewriting the same file, NIT creates a backup named `.notes.legacy.<process-id>.bak` in the current directory.
+Before rewriting the same file, NIT creates a process-specific backup inside `.nit/`.
 
-## Manual editing
+### Manual editing
 
-The storage files can be edited with any text editor as long as the expected structure is preserved:
+`.nit/notes` and `.nit/archive` can be edited with any text editor when the expected structure is preserved:
 
-- a recognized horizon heading appears before its entries;
-- a recognized type heading appears inside the horizon section;
-- every entry begins with `- `;
-- additional lines belonging to the same entry are indented by at least two spaces.
+- Notes and Items belong under `## Timeless`;
+- Ideas and To-dos belong under a recognized horizon;
+- entry lines use `- [ID] text`;
+- continuation lines are indented by at least two spaces;
+- an optional Roadmap begins with the exact indented marker `  **Roadmap**`;
+- Roadmap steps contain a sequential number, title, and indented description.
 
-Example of a multiline entry:
+Example multiline entry:
 
 ```markdown
 ### Notes
-- First line
+- [N-0001] First line
   Continuation of the same note
 ```
 
-Content outside recognized sections may be ignored and removed during the next canonical rewrite. Back up the file before experimenting with custom layouts.
+Content outside recognized sections may be omitted during the next canonical rewrite. Keep a backup before experimenting with custom layouts. Press `r` in the TUI to reload files changed externally.
 
-If a file is changed while the TUI is open, press `r` to reload it.
+## Architecture
+
+The executable entry point is intentionally small, while each module owns one responsibility:
+
+```text
+src/
+├── ai.rs            # on-demand Ollama Roadmap generation
+├── cli.rs           # argument parsing and command dispatch
+├── commands.rs      # entry operations
+├── editor.rs        # external editor selection
+├── ids.rs           # ID allocation, migration, and validation
+├── lib.rs           # application composition
+├── main.rs          # executable entry point
+├── model.rs         # domain types
+├── storage.rs       # Markdown parsing and persistence
+├── workspace.rs     # workspace discovery, initialization, and migration
+└── tui/
+    ├── mod.rs       # state, events, and actions
+    └── ui.rs        # terminal rendering
+```
+
+Workspace discovery is centralized and passed into CLI and TUI operations. Storage receives explicit paths and remains responsible only for parsing, serialization, reading, and writing.
+
+## Development
+
+Run the required validation suite:
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked
+```
+
+Build an optimized executable:
+
+```bash
+cargo build --release --locked
+```
+
+The binary is written to `target/release/nit`.
+
+### Release workflow
+
+Release tags must match the version in `Cargo.toml`:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The GitHub Actions workflow validates the project, builds the supported release archive, generates a SHA-256 checksum, prepares the installer, and publishes the assets on GitHub Releases.
 
 ## Brand assets
-
-The official banner and square icon are stored in the repository and can be reused when presenting or packaging NIT System.
 
 | Banner | Icon |
 |---|---|
 | <img src="assets/nit-system-banner.jpeg" alt="NIT System banner" width="560"> | <img src="assets/nit-system-icon.jpeg" alt="NIT System icon" width="220"> |
 
-- [`assets/nit-system-banner.jpeg`](assets/nit-system-banner.jpeg) — 1600×900 project banner.
-- [`assets/nit-system-icon.jpeg`](assets/nit-system-icon.jpeg) — 1254×1254 square icon.
-
-## Architecture
-
-The executable is separated from the application core. `main.rs` only starts the library, while each module owns a specific responsibility:
-
-```text
-src/
-├── main.rs          # executable entry point
-├── lib.rs           # core composition
-├── cli.rs           # argument parsing and command dispatch
-├── commands.rs      # entry operations
-├── editor.rs        # external editor selection
-├── model.rs         # domain types
-├── storage.rs       # Markdown persistence
-└── tui/
-    ├── mod.rs       # interface state, events, and actions
-    └── ui.rs        # interface rendering
-```
-
-Internal interfaces use crate-level visibility. This keeps the core testable without exposing implementation details as a stable public API.
-
-## Development
-
-Build the debug executable:
-
-```bash
-cargo build
-```
-
-Run the test suite:
-
-```bash
-cargo test
-```
-
-Format the source:
-
-```bash
-cargo fmt
-```
-
-Build an optimized binary:
-
-```bash
-cargo build --release
-```
-
-The optimized executable is written to `target/release/nit`.
-
-### Publishing a release
-
-Release tags must match the version in `Cargo.toml`. To publish version `0.1.0` after the repository has been configured:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release workflow runs the tests, builds the optimized Linux x86-64 binary, generates a SHA-256 checksum, embeds the repository address into the installer, and publishes all three files on the GitHub Release. GitHub supports stable links to assets from the latest release, which allows the installation command to remain unchanged across versions.
+- [`assets/nit-system-banner.jpeg`](assets/nit-system-banner.jpeg)
+- [`assets/nit-system-icon.jpeg`](assets/nit-system-icon.jpeg)
 
 ## Troubleshooting
 
 ### `nit: command not found`
 
-Check whether Cargo installed the executable:
+Check the installation location and ensure it is in `PATH`:
 
 ```bash
-ls "$HOME/.cargo/bin/nit"
+command -v nit
 ```
 
-Add the containing directory to `PATH` and start a new shell.
+Release installations normally use `~/.local/bin`; Cargo installations normally use `~/.cargo/bin`.
+
+### No workspace is found
+
+Return to the intended root and initialize explicitly:
+
+```bash
+nit -init
+```
+
+NIT never creates storage during capture, listing, or TUI startup.
 
 ### Entries do not appear
 
-Check the current directory:
+Inspect the discovered context:
 
 ```bash
-pwd
+nit -root
+nit -path
+nit -status
 ```
 
-Each directory has its own `.notes` collection. Run NIT from the directory containing the expected file.
+The nearest `.nit/` directory wins.
 
-### A text query is ambiguous
+### A query is ambiguous
 
-Entries with similar text require a more specific query:
+Use the entry ID or a longer unique fragment:
 
 ```bash
-nit show deployment checklist for staging
+nit -show ST-0001
+nit -show deployment checklist for staging
 ```
 
-TUI actions operate on the selected entry and do not require unique text.
+### Ollama generation fails
 
-### The terminal remains in an altered state after interruption
+Confirm that Ollama and the configured model are available:
 
-If the process is terminated externally while the TUI is using raw mode, restore the terminal with:
+```bash
+ollama list
+ollama show qwen3:1.7b
+```
+
+AI failures do not modify workspace data. Enable `NIT_AI_DEBUG=1` when timing information is needed for diagnosis.
+
+### The terminal remains in raw mode
+
+If the process is terminated externally while the TUI is active, restore the terminal:
 
 ```bash
 reset
 ```
 
-### An imported file is not recognized
+### An imported file is rejected
 
-Verify that the file contains a recognized horizon heading, a recognized entry-type heading, and entries beginning with `- `. Files without recognized entries are rejected.
+Verify that it contains recognized horizon and type headings and entries beginning with `- `. Files without recognized entries are rejected.
+
+## License
+
+NIT System is available under the [MIT License](LICENSE).
