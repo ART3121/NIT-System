@@ -3,8 +3,10 @@ use std::{fs, path::Path};
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    model::{Entry, Horizon, Kind, Notes},
-    storage::{archive_path, load, notes_path, save, ACTIVE_TITLE, ARCHIVE_TITLE},
+    ids::IdSequences,
+    model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap},
+    storage::{load, save, ACTIVE_TITLE, ARCHIVE_TITLE},
+    workspace::Workspace,
 };
 
 pub(crate) fn text(parts: Vec<String>) -> Result<String> {
@@ -15,51 +17,57 @@ pub(crate) fn text(parts: Vec<String>) -> Result<String> {
     Ok(value)
 }
 
-pub(crate) fn capture_text(mut parts: Vec<String>) -> Result<(Kind, Horizon, String)> {
-    let mut kind = Kind::Todo;
-    let mut horizon = Horizon::Short;
-    if let Some(last) = parts.last() {
-        if let Some((parsed_kind, parsed_horizon)) = parse_capture_code(last) {
-            parts.pop();
-            kind = parsed_kind;
-            horizon = parsed_horizon;
-        } else if last.starts_with('-') && last.len() == 3 {
-            bail!("unknown capture code '{last}'; use -si/-sn/-sx/-st, -mi/-mn/-mx/-mt, or -li/-ln/-lx/-lt");
-        }
-    }
+pub(crate) fn capture_text(mut parts: Vec<String>) -> Result<(Kind, Option<Horizon>, String)> {
+    let last = parts
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("capture requires text followed by a code such as -n"))?;
+    let (kind, horizon) = parse_capture_code(last).ok_or_else(|| {
+        anyhow::anyhow!(
+            "capture requires a valid final code; use -si/-mi/-li, -st/-mt/-lt, -n, or -x"
+        )
+    })?;
+    parts.pop();
     Ok((kind, horizon, text(parts)?))
 }
 
-fn parse_capture_code(code: &str) -> Option<(Kind, Horizon)> {
-    let mut characters = code.chars();
-    if characters.next()? != '-' {
-        return None;
+pub(crate) fn parse_capture_code(code: &str) -> Option<(Kind, Option<Horizon>)> {
+    match code {
+        "-n" => Some((Kind::Note, None)),
+        "-x" => Some((Kind::Item, None)),
+        "-si" => Some((Kind::Idea, Some(Horizon::Short))),
+        "-mi" => Some((Kind::Idea, Some(Horizon::Medium))),
+        "-li" => Some((Kind::Idea, Some(Horizon::Long))),
+        "-st" => Some((Kind::Todo, Some(Horizon::Short))),
+        "-mt" => Some((Kind::Todo, Some(Horizon::Medium))),
+        "-lt" => Some((Kind::Todo, Some(Horizon::Long))),
+        _ => None,
     }
-    let horizon = match characters.next()? {
-        's' => Horizon::Short,
-        'm' => Horizon::Medium,
-        'l' => Horizon::Long,
-        _ => return None,
-    };
-    let kind = match characters.next()? {
-        'i' => Kind::Idea,
-        'n' => Kind::Note,
-        'x' => Kind::Item,
-        't' => Kind::Todo,
-        _ => return None,
-    };
-    characters.next().is_none().then_some((kind, horizon))
 }
 
-pub(crate) fn add(notes: &mut Notes, kind: Kind, horizon: Horizon, text: String) {
+pub(crate) fn add(
+    notes: &mut Notes,
+    id: Option<EntryId>,
+    kind: Kind,
+    horizon: Option<Horizon>,
+    text: String,
+) {
     notes.entries.push(Entry {
+        id,
         kind,
         horizon,
         text,
+        roadmap: None,
     });
 }
 
 pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
+    if let Some(id) = EntryId::parse(query) {
+        return notes
+            .entries
+            .iter()
+            .position(|entry| entry.id == Some(id))
+            .ok_or_else(|| anyhow::anyhow!("no entry has ID {id}"));
+    }
     let query = query.trim().to_lowercase();
     let exact: Vec<usize> = notes
         .entries
@@ -86,60 +94,225 @@ pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
     }
 }
 
-pub(crate) fn create(path: &Path, kind: Kind, horizon: Horizon, value: String) -> Result<()> {
-    let mut notes = load(path)?;
-    add(&mut notes, kind, horizon, value);
-    save(path, &notes, ACTIVE_TITLE)?;
-    println!("Added {kind}/{horizon}.");
-    Ok(())
+pub(crate) fn roadmap_target(workspace: &Workspace, id: EntryId) -> Result<Entry> {
+    let notes = load(&workspace.notes_path())?;
+    let entry = notes
+        .entries
+        .into_iter()
+        .find(|entry| entry.id == Some(id))
+        .ok_or_else(|| anyhow::anyhow!("no active entry has ID {id}"))?;
+    if entry.roadmap.is_some() {
+        bail!("entry {id} already has a Roadmap; remove it manually before generating another");
+    }
+    Ok(entry)
 }
 
-pub(crate) fn archive_entry(query: &str) -> Result<()> {
-    let active_path = notes_path()?;
-    let archived_path = archive_path()?;
+pub(crate) fn attach_roadmap(
+    workspace: &Workspace,
+    expected: &Entry,
+    roadmap: Roadmap,
+) -> Result<()> {
+    let id = expected
+        .id
+        .ok_or_else(|| anyhow::anyhow!("Roadmap targets require an entry ID"))?;
+    let path = workspace.notes_path();
+    let mut notes = load(&path)?;
+    let index = notes
+        .entries
+        .iter()
+        .position(|entry| entry.id == Some(id))
+        .ok_or_else(|| anyhow::anyhow!("active entry {id} no longer exists"))?;
+    if &notes.entries[index] != expected {
+        bail!("entry {id} changed while its Roadmap was being generated; nothing was saved");
+    }
+    notes.entries[index].roadmap = Some(roadmap);
+    save(&path, &notes, ACTIVE_TITLE)
+}
+
+pub(crate) fn create(
+    workspace: &Workspace,
+    kind: Kind,
+    horizon: Option<Horizon>,
+    value: String,
+) -> Result<EntryId> {
+    let active_path = workspace.notes_path();
+    let archived_path = workspace.archive_path();
     let mut active = load(&active_path)?;
+    let archived = load(&archived_path)?;
+    IdSequences::require_all_ids([&active, &archived])?;
+    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+    sequences.reconcile([&active, &archived])?;
+    let id = sequences.allocate(horizon, kind)?;
+    add(&mut active, Some(id), kind, horizon, value);
+    save(&active_path, &active, ACTIVE_TITLE)?;
+    sequences.save(&workspace.next_ids_path())?;
+    Ok(id)
+}
+
+pub(crate) fn archive_entry(workspace: &Workspace, query: &str) -> Result<()> {
+    let active_path = workspace.notes_path();
+    let archived_path = workspace.archive_path();
+    let mut active = load(&active_path)?;
+    let mut archived = load(&archived_path)?;
+    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+    sequences.reconcile([&active, &archived])?;
     let index = find_index(&active, query)?;
     let entry = active.entries.remove(index);
-    let mut archived = load(&archived_path)?;
     archived.entries.push(entry);
-    save(&active_path, &active, ACTIVE_TITLE)?;
     save(&archived_path, &archived, ARCHIVE_TITLE)?;
+    save(&active_path, &active, ACTIVE_TITLE)?;
     println!("Archived.");
     Ok(())
 }
 
-pub(crate) fn import_notes(target: &Path, source: &Path) -> Result<()> {
+pub(crate) fn import_notes(workspace: &Workspace, source: &Path) -> Result<usize> {
+    let target = workspace.notes_path();
     let source_notes = load(source)?;
     if source_notes.entries.is_empty() {
-        bail!("no entries found; import files using the INIT headings and '- text' entries");
+        bail!("no entries found; import files using the NIT headings and '- text' entries");
     }
     let same_file = source == target;
-    let mut target_notes = if same_file {
-        Notes::default()
-    } else {
-        load(target)?
-    };
-    target_notes.entries.extend(source_notes.entries);
     if same_file {
-        let backup = target.with_file_name(format!(".notes.legacy.{}.bak", std::process::id()));
+        let backup = target.with_file_name(format!("notes.import.{}.bak", std::process::id()));
         fs::copy(source, &backup)
             .with_context(|| format!("could not create backup {}", backup.display()))?;
-        println!("Created backup: {}", backup.display());
+        save(&target, &source_notes, ACTIVE_TITLE)?;
+        return Ok(source_notes.entries.len());
     }
-    save(target, &target_notes, ACTIVE_TITLE)?;
-    println!("Imported entries.");
-    Ok(())
+
+    let archived = load(&workspace.archive_path())?;
+    let mut target_notes = load(&target)?;
+    IdSequences::require_all_ids([&target_notes, &archived])?;
+    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+    let imported_count = source_notes.entries.len();
+    let mut imported = source_notes;
+    for entry in &mut imported.entries {
+        if entry.id.is_some_and(|id| !id.is_current()) {
+            entry.id = None;
+        }
+    }
+    sequences.reconcile([&target_notes, &archived, &imported])?;
+    for entry in &mut imported.entries {
+        if entry.id.is_none() {
+            entry.id = Some(sequences.allocate(entry.horizon, entry.kind)?);
+        }
+    }
+    target_notes.entries.extend(imported.entries);
+    sequences.reconcile([&target_notes, &archived])?;
+    save(&target, &target_notes, ACTIVE_TITLE)?;
+    sequences.save(&workspace.next_ids_path())?;
+    Ok(imported_count)
+}
+
+pub(crate) fn migrate_timeless_ids(workspace: &Workspace) -> Result<usize> {
+    let notes_path = workspace.notes_path();
+    let archive_path = workspace.archive_path();
+    let sequence_path = workspace.next_ids_path();
+    let mut active = load(&notes_path)?;
+    let mut archived = load(&archive_path)?;
+    let legacy = active
+        .entries
+        .iter()
+        .chain(&archived.entries)
+        .filter(|entry| entry.id.is_some_and(|id| !id.is_current()))
+        .count();
+    let mut sequences = IdSequences::load(&sequence_path)?;
+    sequences.reconcile_for_timeless_migration([&active, &archived])?;
+    if legacy == 0 {
+        sequences.save(&sequence_path)?;
+        return Ok(0);
+    }
+
+    let notes_backup = workspace.nit_dir().join("notes.pre-timeless.bak");
+    let archive_backup = workspace.nit_dir().join("archive.pre-timeless.bak");
+    let sequences_backup = workspace.nit_dir().join("next-ids.pre-timeless.bak");
+    if notes_backup.exists() || archive_backup.exists() || sequences_backup.exists() {
+        bail!("cannot migrate timeless IDs: a pre-timeless backup already exists");
+    }
+
+    for entry in active.entries.iter_mut().chain(&mut archived.entries) {
+        if entry.id.is_some_and(|id| !id.is_current()) {
+            entry.id = Some(sequences.allocate(None, entry.kind)?);
+        }
+    }
+    sequences.reconcile([&active, &archived])?;
+
+    fs::copy(&notes_path, &notes_backup)
+        .with_context(|| format!("could not create {}", notes_backup.display()))?;
+    fs::copy(&archive_path, &archive_backup)
+        .with_context(|| format!("could not create {}", archive_backup.display()))?;
+    fs::copy(&sequence_path, &sequences_backup)
+        .with_context(|| format!("could not create {}", sequences_backup.display()))?;
+    save(&notes_path, &active, ACTIVE_TITLE)?;
+    save(&archive_path, &archived, ARCHIVE_TITLE)?;
+    sequences.save(&sequence_path)?;
+    if load(&notes_path)? != active || load(&archive_path)? != archived {
+        bail!("timeless migration validation failed; backups were preserved");
+    }
+    Ok(legacy)
+}
+
+pub(crate) fn assign_missing_ids(workspace: &Workspace) -> Result<usize> {
+    let notes_path = workspace.notes_path();
+    let archive_path = workspace.archive_path();
+    let mut active = load(&notes_path)?;
+    let mut archived = load(&archive_path)?;
+    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+    sequences.reconcile([&active, &archived])?;
+    let missing = active
+        .entries
+        .iter()
+        .chain(&archived.entries)
+        .filter(|entry| entry.id.is_none())
+        .count();
+    if missing == 0 {
+        sequences.save(&workspace.next_ids_path())?;
+        return Ok(0);
+    }
+
+    let notes_backup = workspace.nit_dir().join("notes.pre-ids.bak");
+    let archive_backup = workspace.nit_dir().join("archive.pre-ids.bak");
+    if notes_backup.exists() || archive_backup.exists() {
+        bail!("cannot assign IDs: a pre-ID backup already exists");
+    }
+    fs::copy(&notes_path, &notes_backup)
+        .with_context(|| format!("could not create {}", notes_backup.display()))?;
+    fs::copy(&archive_path, &archive_backup)
+        .with_context(|| format!("could not create {}", archive_backup.display()))?;
+
+    for entry in active.entries.iter_mut().chain(&mut archived.entries) {
+        if entry.id.is_none() {
+            entry.id = Some(sequences.allocate(entry.horizon, entry.kind)?);
+        }
+    }
+    sequences.reconcile([&active, &archived])?;
+    save(&notes_path, &active, ACTIVE_TITLE)?;
+    save(&archive_path, &archived, ARCHIVE_TITLE)?;
+    sequences.save(&workspace.next_ids_path())?;
+    if load(&notes_path)? != active || load(&archive_path)? != archived {
+        bail!("ID assignment validation failed; backups were preserved");
+    }
+    Ok(missing)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
     fn finds_a_unique_text_fragment() {
         let mut notes = Notes::default();
-        add(&mut notes, Kind::Note, Horizon::Short, "buy coffee".into());
+        add(
+            &mut notes,
+            EntryId::new(None, Kind::Note, 1),
+            Kind::Note,
+            None,
+            "buy coffee".into(),
+        );
         assert_eq!(find_index(&notes, "coffee").unwrap(), 0);
+        assert_eq!(find_index(&notes, "N-0001").unwrap(), 0);
     }
 
     #[test]
@@ -147,9 +320,45 @@ mod tests {
         let (kind, horizon, value) =
             capture_text(vec!["build".into(), "RISC-V".into(), "-st".into()]).unwrap();
         assert_eq!(kind, Kind::Todo);
-        assert_eq!(horizon, Horizon::Short);
+        assert_eq!(horizon, Some(Horizon::Short));
         assert_eq!(value, "build RISC-V");
-        assert_eq!(parse_capture_code("-li"), Some((Kind::Idea, Horizon::Long)));
-        assert_eq!(parse_capture_code("-lx"), Some((Kind::Item, Horizon::Long)));
+        assert_eq!(
+            parse_capture_code("-li"),
+            Some((Kind::Idea, Some(Horizon::Long)))
+        );
+        assert_eq!(parse_capture_code("-n"), Some((Kind::Note, None)));
+        assert_eq!(parse_capture_code("-x"), Some((Kind::Item, None)));
+        assert_eq!(parse_capture_code("-sn"), None);
+    }
+
+    #[test]
+    fn capture_requires_a_combined_code() {
+        assert!(capture_text(vec!["buy".into(), "coffee".into()]).is_err());
+    }
+
+    #[test]
+    fn roadmap_attachment_revalidates_the_entry() {
+        let directory =
+            std::env::temp_dir().join(format!("nit-roadmap-attachment-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let workspace = Workspace::init(&directory).unwrap().workspace;
+        let id = create(&workspace, Kind::Note, None, "Learn".into()).unwrap();
+        let target = roadmap_target(&workspace, id).unwrap();
+        let roadmap = Roadmap {
+            steps: vec![crate::model::RoadmapStep {
+                title: "First".into(),
+                description: "Do the first step.".into(),
+            }],
+        };
+        attach_roadmap(&workspace, &target, roadmap.clone()).unwrap();
+        assert_eq!(
+            load(&workspace.notes_path()).unwrap().entries[0].roadmap,
+            Some(roadmap)
+        );
+
+        let stale = roadmap_target(&workspace, id).unwrap_err();
+        assert!(stale.to_string().contains("already has a Roadmap"));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

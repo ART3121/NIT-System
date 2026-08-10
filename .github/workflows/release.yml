@@ -39,7 +39,8 @@ jobs:
           asset="nit-x86_64-unknown-linux-gnu.tar.gz"
           mkdir -p dist/package
           install -m 755 target/release/nit dist/package/nit
-          tar -C dist/package -czf "dist/$asset" nit
+          install -m 644 LICENSE dist/package/LICENSE
+          tar -C dist/package -czf "dist/$asset" nit LICENSE
           (
             cd dist
             sha256sum "$asset" > "$asset.sha256"
