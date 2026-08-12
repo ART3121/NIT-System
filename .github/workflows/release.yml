@@ -105,5 +105,6 @@ jobs:
             dist/nitcat-x86_64-unknown-linux-gnu.tar.gz \
             dist/nitcat-x86_64-unknown-linux-gnu.tar.gz.sha256 \
             dist/install.sh \
+            --repo "$GITHUB_REPOSITORY" \
             --title "NIT System $GITHUB_REF_NAME" \
             --generate-notes
