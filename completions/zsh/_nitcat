@@ -1,0 +1,22 @@
+#compdef nitcat
+
+_nitcat() {
+    local -a ids options
+    options=(
+        '-help:Show help'
+        '-version:Show version'
+        '-completions:Generate shell completions'
+    )
+
+    if [[ "$words[2]" == '-completions' ]]; then
+        _values 'shell' bash zsh fish
+        return
+    fi
+
+    ids=("${(@f)$(nitcat -completion-ids 2>/dev/null)}")
+    _describe 'NIT Note ID' ids
+    _describe 'option' options
+    _files
+}
+
+_nitcat "$@"

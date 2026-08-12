@@ -1,17 +1,18 @@
+use std::collections::VecDeque;
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::{
-    ai::roadmap_text,
-    model::{Entry, Kind, Notes},
-};
+use nit_ai::roadmap_text;
+use nit_core::{Entry, Kind, Notes};
+use nitcat::markdown::{self, MarkdownPalette};
 
-use super::{AiDialog, App, AI_TOOLS};
+use super::{navigator_nodes, AiDialog, App, NavigatorNode, Screen, AI_TOOLS};
 
 pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, indexes: &[usize]) {
     let background = Color::Rgb(30, 30, 30);
@@ -24,11 +25,12 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
     let yellow = Color::Rgb(220, 220, 170);
     let red = Color::Rgb(244, 71, 71);
     let selected_background = Color::Rgb(38, 79, 120);
+    let navigator_selection = Color::Rgb(46, 52, 64);
     frame.render_widget(
         Block::default().style(Style::default().bg(background)),
         frame.area(),
     );
-    let content_area = if app.ai_menu_open {
+    let mut content_area = if app.ai_menu_open {
         let menu_width = if frame.area().width >= 80 { 30 } else { 24 };
         let columns = Layout::horizontal([Constraint::Min(20), Constraint::Length(menu_width)])
             .split(frame.area());
@@ -46,6 +48,29 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
     } else {
         frame.area()
     };
+    let navigator_inline = app.tree_visible && content_area.width >= 68;
+    if navigator_inline {
+        let columns =
+            Layout::horizontal([Constraint::Length(28), Constraint::Min(40)]).split(content_area);
+        draw_navigator(
+            frame,
+            columns[0],
+            notes,
+            app,
+            panel,
+            foreground,
+            muted,
+            blue,
+            cyan,
+            magenta,
+            yellow,
+            navigator_selection,
+        );
+        app.navigator_area = Some(columns[0]);
+        content_area = columns[1];
+    } else {
+        app.navigator_area = None;
+    }
 
     let preview = indexes
         .get(app.selected)
@@ -68,12 +93,15 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
             )
         })
         .unwrap_or_else(|| "No entries in this view.".into());
-    let capture_mode = app.capture_input.is_some();
+    let capture_mode = app.capture_input.is_some() || app.search_input.is_some();
     let full_inner_width = usize::from(content_area.width.saturating_sub(2)).max(1);
-    let help = app
-        .capture_input
-        .as_ref()
-        .map_or_else(String::new, |input| format!(":{input}"));
+    let help = if let Some(input) = &app.capture_input {
+        format!(":{input}")
+    } else if let Some(input) = &app.search_input {
+        format!("/{input}")
+    } else {
+        String::new()
+    };
     let preview_lines = wrap_text(&preview, full_inner_width);
     let help_lines = wrap_text(&help, full_inner_width);
     let (selected_height, measured_command_height) =
@@ -92,7 +120,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
     .split(content_area);
 
     let filters = format!(
-        "{} entries  ·  Type: {}  ·  Horizon: {}  ·  View: {}",
+        "{} entries  ·  Type: {}  ·  Horizon: {}  ·  View: {}{}",
         indexes.len(),
         app.kind
             .map(|value| value.to_string())
@@ -100,7 +128,12 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
         app.horizon
             .map(|value| value.to_string())
             .unwrap_or("all".into()),
-        if app.archived { "archived" } else { "active" }
+        if app.archived { "archived" } else { "active" },
+        if app.search_query.is_empty() {
+            String::new()
+        } else {
+            format!("  ·  Search: {}", app.search_query)
+        }
     );
     frame.render_widget(
         Paragraph::new(filters)
@@ -118,32 +151,79 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
 
     let entry_areas =
         Layout::horizontal([Constraint::Min(1), Constraint::Length(11)]).split(areas[1]);
+    let entry_text_width = usize::from(entry_areas[0].width.saturating_sub(4)).max(1);
+    let viewport_lines = usize::from(entry_areas[0].height.saturating_sub(2)).max(1);
+    let wrap_row = |row: usize| {
+        let index = indexes[row];
+        let entry = &notes.entries[index];
+        let wrapped = entry_display_lines(
+            entry,
+            entry_text_width,
+            entry.id.is_some_and(|id| app.expanded.contains(&id)),
+        );
+        (row, index, wrapped)
+    };
+    let mut visible = VecDeque::new();
+    if !indexes.is_empty() {
+        let selected = app.selected.min(indexes.len() - 1);
+        let selected_row = wrap_row(selected);
+        let mut used = selected_row.2.len().max(1);
+        visible.push_back(selected_row);
+
+        let above_target = viewport_lines.saturating_sub(used) / 2;
+        let mut above_used = 0;
+        let mut previous = selected;
+        while previous > 0 && above_used < above_target {
+            let candidate = wrap_row(previous - 1);
+            let height = candidate.2.len().max(1);
+            if used.saturating_add(height) > viewport_lines {
+                break;
+            }
+            previous -= 1;
+            above_used += height;
+            used += height;
+            visible.push_front(candidate);
+        }
+
+        let mut next = selected + 1;
+        while next < indexes.len() && used < viewport_lines {
+            let candidate = wrap_row(next);
+            let height = candidate.2.len().max(1);
+            if used.saturating_add(height) > viewport_lines {
+                break;
+            }
+            used += height;
+            next += 1;
+            visible.push_back(candidate);
+        }
+        while previous > 0 && used < viewport_lines {
+            let candidate = wrap_row(previous - 1);
+            let height = candidate.2.len().max(1);
+            if used.saturating_add(height) > viewport_lines {
+                break;
+            }
+            previous -= 1;
+            used += height;
+            visible.push_front(candidate);
+        }
+    }
+    let window_start = visible.front().map_or(0, |(row, _, _)| *row);
+    let local_selected = (!visible.is_empty()).then_some(app.selected.saturating_sub(window_start));
     app.list_state
         .select((!indexes.is_empty()).then_some(app.selected));
-    let entry_text_width = usize::from(entry_areas[0].width.saturating_sub(4)).max(1);
-    let wrapped_entries: Vec<Vec<String>> = indexes
+    *app.list_state.offset_mut() = window_start;
+    let mut entry_state = ListState::default().with_selected(local_selected);
+    let mut id_state = ListState::default().with_selected(local_selected);
+    let items: Vec<ListItem> = visible
         .iter()
-        .map(|index| {
-            let entry = &notes.entries[*index];
-            entry_display_lines(
-                entry,
-                entry_text_width,
-                entry.id.is_some_and(|id| app.expanded.contains(&id)),
-            )
-        })
-        .collect();
-    let items: Vec<ListItem> = indexes
-        .iter()
-        .zip(&wrapped_entries)
-        .enumerate()
-        .map(|(row, (index, wrapped))| {
+        .map(|(row, index, wrapped)| {
             let entry = &notes.entries[*index];
             let entry_color = kind_color(entry.kind, blue, cyan, magenta, yellow);
             let lines: Vec<Line> = wrapped
                 .iter()
                 .enumerate()
                 .map(|(line_index, text)| {
-                    let prefix = if line_index == 0 && row == app.selected {
+                    let prefix = if line_index == 0 && *row == app.selected {
                         "> "
                     } else {
                         "  "
@@ -151,7 +231,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
                     Line::from(format!("{prefix}{text}"))
                 })
                 .collect();
-            ListItem::new(lines).style(if row == app.selected {
+            ListItem::new(lines).style(if *row == app.selected {
                 Style::default()
                     .fg(entry_color)
                     .bg(selected_background)
@@ -177,16 +257,14 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
                 .style(Style::default().bg(panel)),
         ),
         entry_areas[0],
-        &mut app.list_state,
+        &mut entry_state,
     );
 
     frame.render_stateful_widget(
         List::new(
-            indexes
+            visible
                 .iter()
-                .zip(&wrapped_entries)
-                .enumerate()
-                .map(|(row, (index, wrapped))| {
+                .map(|(row, index, wrapped)| {
                     let entry = &notes.entries[*index];
                     let color = kind_color(entry.kind, blue, cyan, magenta, yellow);
                     let mut lines = vec![Line::from(
@@ -196,7 +274,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
                             .unwrap_or_else(|| "—".into()),
                     )];
                     lines.resize_with(wrapped.len(), || Line::from(""));
-                    ListItem::new(lines).style(if row == app.selected {
+                    ListItem::new(lines).style(if *row == app.selected {
                         Style::default()
                             .fg(color)
                             .bg(selected_background)
@@ -216,7 +294,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
                 .style(Style::default().bg(panel)),
         ),
         entry_areas[1],
-        &mut app.list_state,
+        &mut id_state,
     );
 
     frame.render_widget(
@@ -243,7 +321,11 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title("Capture — :w add / :q or Ctrl+C quit / Esc cancel")
+                        .title(if app.search_input.is_some() {
+                            "Search — Enter apply / Esc cancel"
+                        } else {
+                            "Capture — :w add / :q or Ctrl+C quit / Esc cancel"
+                        })
                         .title_style(Style::default().fg(yellow))
                         .border_style(Style::default().fg(yellow))
                         .style(Style::default().bg(panel)),
@@ -265,6 +347,49 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
         );
     }
     app.help_button_area = (!capture_mode).then(|| help_button_rect(areas[3]));
+
+    if matches!(app.screen, Screen::NoteViewer(_)) {
+        frame.render_widget(Clear, content_area);
+        draw_note_viewer(
+            frame,
+            content_area,
+            notes,
+            app,
+            background,
+            panel,
+            foreground,
+            muted,
+            blue,
+            cyan,
+            magenta,
+            yellow,
+            red,
+            selected_background,
+        );
+    } else {
+        app.viewer_area = None;
+    }
+
+    if app.tree_visible && !navigator_inline && app.navigator_focus {
+        let width = frame.area().width.min(32);
+        let overlay = Rect::new(frame.area().x, frame.area().y, width, frame.area().height);
+        frame.render_widget(Clear, overlay);
+        draw_navigator(
+            frame,
+            overlay,
+            notes,
+            app,
+            panel,
+            foreground,
+            muted,
+            blue,
+            cyan,
+            magenta,
+            yellow,
+            navigator_selection,
+        );
+        app.navigator_area = Some(overlay);
+    }
 
     if app.ai_receiver.is_some() {
         let popup = centered(frame.area(), 68, 34);
@@ -336,7 +461,11 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
         frame.render_widget(
             Paragraph::new(format!(
                 "{}\n\n[H] or Esc close",
-                grouped_help(&app.message)
+                if matches!(app.screen, Screen::NoteViewer(_)) {
+                    note_viewer_help(&app.message)
+                } else {
+                    grouped_help(&app.message)
+                }
             ))
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(foreground).bg(panel))
@@ -353,14 +482,244 @@ pub(super) fn draw(frame: &mut ratatui::Frame, notes: &Notes, app: &mut App, ind
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_note_viewer(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    notes: &Notes,
+    app: &mut App,
+    background: Color,
+    panel: Color,
+    foreground: Color,
+    muted: Color,
+    blue: Color,
+    cyan: Color,
+    magenta: Color,
+    yellow: Color,
+    red: Color,
+    selected_background: Color,
+) {
+    let (id, query, search_input, requested_scroll) = match &app.screen {
+        Screen::NoteViewer(viewer) => (
+            viewer.id,
+            viewer
+                .search_input
+                .as_deref()
+                .unwrap_or(&viewer.search_query)
+                .to_owned(),
+            viewer.search_input.clone(),
+            viewer.scroll,
+        ),
+        Screen::Browser => return,
+    };
+    let Some(entry) = notes.entries.iter().find(|entry| entry.id == Some(id)) else {
+        app.viewer_area = Some(area);
+        frame.render_widget(
+            Paragraph::new("This Note no longer exists. Press Esc to return.")
+                .style(Style::default().fg(red).bg(panel))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {id} · unavailable "))
+                        .border_style(Style::default().fg(red)),
+                ),
+            area,
+        );
+        return;
+    };
+
+    let command_input = app.capture_input.clone();
+    let input_height = if search_input.is_some() || command_input.is_some() {
+        3
+    } else {
+        1
+    };
+    let sections =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(input_height)]).split(area);
+    let viewport_height = usize::from(sections[0].height.saturating_sub(2)).max(1);
+    let width = usize::from(sections[0].width.saturating_sub(2)).max(1);
+    let cache_matches = app
+        .viewer_render_cache
+        .as_ref()
+        .is_some_and(|cache| cache.entry == *entry && cache.width == width && cache.query == query);
+    if !cache_matches {
+        app.viewer_render_cache = Some(super::ViewerRenderCache {
+            entry: entry.clone(),
+            width,
+            query: query.clone(),
+            document: markdown::render(
+                &note_viewer_markdown(entry),
+                width,
+                &query,
+                MarkdownPalette {
+                    foreground,
+                    muted,
+                    blue,
+                    cyan,
+                    magenta,
+                    yellow,
+                    code_background: background,
+                    match_background: selected_background,
+                },
+            ),
+        });
+    }
+    let document = &app
+        .viewer_render_cache
+        .as_ref()
+        .expect("viewer render cache exists")
+        .document;
+    let total_lines = document.lines.len();
+    let scroll = requested_scroll.min(total_lines.saturating_sub(viewport_height));
+    let mut match_label = String::new();
+    let mut current_match_line = None;
+    if let Screen::NoteViewer(viewer) = &mut app.screen {
+        viewer.viewport_height = viewport_height;
+        viewer.total_lines = total_lines;
+        viewer.match_lines = document.match_lines.clone();
+        if viewer.match_lines.is_empty() {
+            viewer.selected_match = 0;
+        } else {
+            viewer.selected_match = viewer.selected_match.min(viewer.match_lines.len() - 1);
+            match_label = format!(
+                " · match {}/{}",
+                viewer.selected_match + 1,
+                viewer.match_lines.len()
+            );
+            current_match_line = viewer.match_lines.get(viewer.selected_match).copied();
+        }
+        viewer.scroll = scroll;
+    }
+    let start = scroll.min(document.lines.len());
+    let end = start
+        .saturating_add(viewport_height)
+        .min(document.lines.len());
+    let mut visible_lines = document.lines[start..end].to_vec();
+    if let Some(line) = current_match_line
+        .filter(|index| (start..end).contains(index))
+        .and_then(|index| visible_lines.get_mut(index - start))
+    {
+        for span in &mut line.spans {
+            span.style = span
+                .style
+                .fg(yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(visible_lines)
+            .style(Style::default().fg(foreground).bg(panel))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {id} · {}{match_label} ", entry.text))
+                    .title_style(Style::default().fg(cyan).add_modifier(Modifier::BOLD))
+                    .border_style(Style::default().fg(blue))
+                    .style(Style::default().bg(panel)),
+            ),
+        sections[0],
+    );
+    app.viewer_area = Some(sections[0]);
+
+    if let Some(input) = search_input {
+        frame.render_widget(
+            Paragraph::new(format!("/{input}"))
+                .style(Style::default().fg(yellow).bg(panel))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Find in Note · Enter apply · Esc cancel")
+                        .title_style(Style::default().fg(yellow))
+                        .border_style(Style::default().fg(yellow)),
+                ),
+            sections[1],
+        );
+        app.help_button_area = None;
+    } else if let Some(input) = command_input {
+        frame.render_widget(
+            Paragraph::new(format!(":{input}"))
+                .style(Style::default().fg(yellow).bg(panel))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Command · :q quit · Esc cancel")
+                        .title_style(Style::default().fg(yellow))
+                        .border_style(Style::default().fg(yellow)),
+                ),
+            sections[1],
+        );
+        app.help_button_area = None;
+    } else {
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .title_bottom(Line::from("[t]Tree").style(Style::default().fg(muted)))
+                .title_bottom(
+                    Line::from("j/k scroll · / find · e edit · i AI · t tree · Esc back")
+                        .style(Style::default().fg(muted)),
+                )
+                .title_bottom(
+                    Line::from("[H]Help")
+                        .right_aligned()
+                        .style(Style::default().fg(red).add_modifier(Modifier::BOLD)),
+                )
+                .border_style(Style::default().fg(muted))
+                .style(Style::default().bg(background)),
+            sections[1],
+        );
+        app.help_button_area = Some(help_button_rect(sections[1]));
+    }
+}
+
+fn note_viewer_markdown(entry: &Entry) -> String {
+    let mut source = entry.body.trim_matches('\n').to_owned();
+    if let Some(roadmap) = &entry.roadmap {
+        if !source.is_empty() {
+            source.push_str("\n\n");
+        }
+        source.push_str("## Roadmap\n\n");
+        for (index, step) in roadmap.steps.iter().enumerate() {
+            source.push_str(&format!(
+                "{}. **{}**\n   {}\n",
+                index + 1,
+                step.title,
+                step.description
+            ));
+        }
+    }
+    if source.is_empty() {
+        source.push_str("_This Note has no body yet. Press e to edit it._");
+    }
+    source
+}
+
+fn note_viewer_help(message: &str) -> String {
+    let status = if message.is_empty() {
+        "Reading Note"
+    } else {
+        message
+    };
+    format!(
+        "READ        ↑/k up · ↓/j down · PageUp/PageDown page\n\
+JUMP        g/Home beginning · G/End end\n\
+SEARCH      / find · n next · N previous · Esc clear\n\
+NOTE        e edit · i AI mode · t show/hide tree · Tab navigator\n\
+COMMAND     : command · :q quit · Ctrl+C safe exit\n\
+BACK        Esc return to browser\n\
+STATUS      {status}"
+    )
+}
+
 fn grouped_help(message: &str) -> String {
     let status = if message.is_empty() { "Ready" } else { message };
     format!(
-        "NAVIGATION  ↑/k previous · ↓/j next · Enter expand Roadmap\n\
+        "NAVIGATION  Tab switch panel · t show/hide tree · ↑/↓ or j/k move · ←/→ fold notes\n\
 ENTRY       c create · e edit · a archive · u restore · dd delete\n\
-VIEW        v active/archived · r reload\n\
+VIEW        Enter select/expand · v active/archived · r reload\n\
 TYPE        1 all · 2 ideas · 3 notes · 4 items · 5 to-dos\n\
 HORIZON     h all · s short · m medium · l long\n\
+SEARCH      / find title, body, ID, and Roadmap · Esc clear\n\
 AI/CMD      i AI mode · : command · :w add\n\
 EXIT        :q quit · Ctrl+C safe exit\n\
 STATUS      {status}"
@@ -371,6 +730,130 @@ fn help_button_rect(area: Rect) -> Rect {
     const LABEL_WIDTH: u16 = 7;
     let width = LABEL_WIDTH.min(area.width);
     Rect::new(area.right().saturating_sub(width), area.y, width, 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_navigator(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    notes: &Notes,
+    app: &App,
+    panel: Color,
+    foreground: Color,
+    muted: Color,
+    idea: Color,
+    note: Color,
+    item: Color,
+    todo: Color,
+    selected_background: Color,
+) {
+    let note_count = notes
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == Kind::Note)
+        .count();
+    let idea_count = notes
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == Kind::Idea)
+        .count();
+    let item_count = notes
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == Kind::Item)
+        .count();
+    let todo_count = notes
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == Kind::Todo)
+        .count();
+    let nodes = navigator_nodes(notes, app.navigator_notes_expanded);
+    let items = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let cursor = index == app.navigator_selected && app.navigator_focus;
+            let marker = if cursor { "› " } else { "  " };
+            let label = match node {
+                NavigatorNode::All => Line::from(vec![
+                    Span::styled(format!("{marker}◆ All entries "), Style::default().fg(idea)),
+                    Span::styled(
+                        format!("({})", notes.entries.len()),
+                        Style::default().fg(muted),
+                    ),
+                ]),
+                NavigatorNode::Notes => Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "{marker}{} Notes ",
+                            if app.navigator_notes_expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            }
+                        ),
+                        Style::default().fg(note),
+                    ),
+                    Span::styled(format!("({note_count})"), Style::default().fg(muted)),
+                ]),
+                NavigatorNode::Note(id, title) => Line::from(vec![
+                    Span::styled(format!("{marker}  {id} "), Style::default().fg(note)),
+                    Span::styled(title, Style::default().fg(foreground)),
+                ]),
+                NavigatorNode::Ideas => Line::from(vec![
+                    Span::styled(format!("{marker}◇ Ideas "), Style::default().fg(idea)),
+                    Span::styled(format!("({idea_count})"), Style::default().fg(muted)),
+                ]),
+                NavigatorNode::Items => Line::from(vec![
+                    Span::styled(format!("{marker}◇ Items "), Style::default().fg(item)),
+                    Span::styled(format!("({item_count})"), Style::default().fg(muted)),
+                ]),
+                NavigatorNode::Todos => Line::from(vec![
+                    Span::styled(format!("{marker}◇ To-dos "), Style::default().fg(todo)),
+                    Span::styled(format!("({todo_count})"), Style::default().fg(muted)),
+                ]),
+            };
+            let active = navigator_node_is_active(app, node);
+            let style = Style::default()
+                .bg(if cursor { selected_background } else { panel })
+                .add_modifier(if cursor || active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            ListItem::new(label).style(style)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(if app.archived {
+                    " Archive "
+                } else {
+                    " Active "
+                })
+                .title_style(
+                    Style::default()
+                        .fg(if app.archived { item } else { note })
+                        .add_modifier(Modifier::BOLD),
+                )
+                .border_style(Style::default().fg(if app.navigator_focus { idea } else { muted }))
+                .style(Style::default().bg(panel)),
+        ),
+        area,
+    );
+}
+
+fn navigator_node_is_active(app: &App, node: &NavigatorNode) -> bool {
+    match node {
+        NavigatorNode::All => app.kind.is_none(),
+        NavigatorNode::Notes => app.kind == Some(Kind::Note) && app.navigator_note.is_none(),
+        NavigatorNode::Note(id, _) => app.navigator_note == Some(*id),
+        NavigatorNode::Ideas => app.kind == Some(Kind::Idea),
+        NavigatorNode::Items => app.kind == Some(Kind::Item),
+        NavigatorNode::Todos => app.kind == Some(Kind::Todo),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -558,7 +1041,7 @@ fn kind_color(kind: Kind, idea: Color, note: Color, item: Color, todo: Color) ->
 mod tests {
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
-    use crate::model::{Entry, Roadmap, RoadmapStep};
+    use nit_core::{Entry, EntryId, Roadmap, RoadmapStep};
 
     use super::*;
 
@@ -581,11 +1064,12 @@ mod tests {
     fn help_shortcuts_are_grouped_in_separate_rows() {
         let help = grouped_help("Saved.");
         let lines = help.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 9);
         assert!(lines[0].starts_with("NAVIGATION"));
         assert!(lines[1].starts_with("ENTRY"));
-        assert!(lines[5].starts_with("AI/CMD"));
-        assert_eq!(lines[7], "STATUS      Saved.");
+        assert!(lines[5].starts_with("SEARCH"));
+        assert!(lines[6].starts_with("AI/CMD"));
+        assert_eq!(lines[8], "STATUS      Saved.");
     }
 
     #[test]
@@ -629,10 +1113,11 @@ mod tests {
     #[test]
     fn expanded_entries_show_indented_roadmap_steps() {
         let entry = Entry {
-            id: crate::model::EntryId::new(None, Kind::Note, 1),
+            id: EntryId::new(None, Kind::Note, 1),
             kind: Kind::Note,
             horizon: None,
             text: "Learn Kubernetes".into(),
+            body: String::new(),
             roadmap: Some(Roadmap {
                 steps: vec![RoadmapStep {
                     title: "Containers".into(),
@@ -648,6 +1133,188 @@ mod tests {
         assert!(expanded
             .iter()
             .any(|line| line == "     Understand container images."));
+    }
+
+    #[test]
+    fn selected_note_shows_its_title_without_rendering_the_body() {
+        let notes = Notes {
+            entries: vec![Entry {
+                id: EntryId::new(None, Kind::Note, 1),
+                kind: Kind::Note,
+                horizon: None,
+                text: "Architecture".into(),
+                body: "Internal details that should stay out of the compact TUI preview.".into(),
+                roadmap: None,
+            }],
+        };
+        let indexes = vec![0];
+        let mut app = App::default();
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &indexes))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Architecture"));
+        assert!(!text.contains("Internal details"));
+    }
+
+    #[test]
+    fn note_viewer_renders_markdown_body_and_roadmap() {
+        let id = EntryId::new(None, Kind::Note, 1).unwrap();
+        let notes = Notes {
+            entries: vec![Entry {
+                id: Some(id),
+                kind: Kind::Note,
+                horizon: None,
+                text: "Architecture".into(),
+                body: "## Decisions\n\n- Keep storage readable\n- Parse `Markdown`".into(),
+                roadmap: Some(Roadmap {
+                    steps: vec![RoadmapStep {
+                        title: "Validate".into(),
+                        description: "Run the complete test suite.".into(),
+                    }],
+                }),
+            }],
+        };
+        let indexes = vec![0];
+        let mut app = App {
+            screen: Screen::NoteViewer(super::super::NoteViewerState::from_browser(
+                id,
+                false,
+                super::super::BrowserContext::default(),
+            )),
+            kind: Some(Kind::Note),
+            navigator_note: Some(id),
+            ..App::default()
+        };
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &indexes))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("N-0001 · Architecture"));
+        assert!(text.contains("Decisions"));
+        assert!(text.contains("Keep storage readable"));
+        assert!(text.contains("Roadmap"));
+        assert!(text.contains("Validate"));
+        assert!(app.viewer_area.is_some());
+    }
+
+    #[test]
+    fn note_viewer_uses_contextual_help() {
+        assert!(note_viewer_help("Ready").contains("PageUp/PageDown"));
+        assert!(note_viewer_help("Ready").contains("n next · N previous"));
+        assert!(note_viewer_help("Ready").contains("Esc return to browser"));
+    }
+
+    #[test]
+    fn note_viewer_keeps_command_mode_visible() {
+        let id = EntryId::new(None, Kind::Note, 1).unwrap();
+        let notes = Notes {
+            entries: vec![Entry {
+                id: Some(id),
+                kind: Kind::Note,
+                horizon: None,
+                text: "Commands".into(),
+                body: "Body".into(),
+                roadmap: None,
+            }],
+        };
+        let mut app = App {
+            screen: Screen::NoteViewer(super::super::NoteViewerState::from_browser(
+                id,
+                false,
+                super::super::BrowserContext::default(),
+            )),
+            capture_input: Some("q".into()),
+            ..App::default()
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &[0]))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains(":q"));
+        assert!(text.contains("Command"));
+    }
+
+    #[test]
+    fn narrow_note_viewer_uses_full_width_until_navigator_is_focused() {
+        let id = EntryId::new(None, Kind::Note, 1).unwrap();
+        let notes = Notes {
+            entries: vec![Entry {
+                id: Some(id),
+                kind: Kind::Note,
+                horizon: None,
+                text: "Narrow".into(),
+                body: "Visible document content".into(),
+                roadmap: None,
+            }],
+        };
+        let mut app = App {
+            screen: Screen::NoteViewer(super::super::NoteViewerState::from_browser(
+                id,
+                true,
+                super::super::BrowserContext::default(),
+            )),
+            ..App::default()
+        };
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &[0]))
+            .unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("Visible document content"));
+        assert_eq!(app.viewer_area.unwrap().width, 50);
+
+        app.navigator_focus = true;
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &[0]))
+            .unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("Notes"));
+        assert_eq!(app.navigator_area.unwrap().width, 32);
+    }
+
+    #[test]
+    fn hidden_tree_gives_the_browser_and_viewer_the_full_width() {
+        let id = EntryId::new(None, Kind::Note, 1).unwrap();
+        let notes = Notes {
+            entries: vec![Entry {
+                id: Some(id),
+                kind: Kind::Note,
+                horizon: None,
+                text: "Full width".into(),
+                body: "Document body".into(),
+                roadmap: None,
+            }],
+        };
+        let mut app = App {
+            tree_visible: false,
+            ..App::default()
+        };
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &[0]))
+            .unwrap();
+        assert_eq!(app.navigator_area, None);
+
+        app.screen = Screen::NoteViewer(super::super::NoteViewerState::from_browser(
+            id,
+            false,
+            super::super::BrowserContext::default(),
+        ));
+        terminal
+            .draw(|frame| draw(frame, &notes, &mut app, &[0]))
+            .unwrap();
+        assert_eq!(app.navigator_area, None);
+        assert_eq!(app.viewer_area.unwrap().width, 100);
     }
 
     #[test]
@@ -702,10 +1369,11 @@ mod tests {
         let long_text = "X".repeat(120);
         let notes = Notes {
             entries: vec![Entry {
-                id: crate::model::EntryId::new(None, Kind::Note, 1),
+                id: EntryId::new(None, Kind::Note, 1),
                 kind: Kind::Note,
                 horizon: None,
                 text: long_text.clone(),
+                body: String::new(),
                 roadmap: None,
             }],
         };
@@ -745,10 +1413,11 @@ mod tests {
         let notes = Notes {
             entries: (0..20)
                 .map(|number| Entry {
-                    id: crate::model::EntryId::new(None, Kind::Note, number + 1),
+                    id: EntryId::new(None, Kind::Note, number + 1),
                     kind: Kind::Note,
                     horizon: None,
                     text: format!("Entry {number}"),
+                    body: String::new(),
                     roadmap: None,
                 })
                 .collect(),

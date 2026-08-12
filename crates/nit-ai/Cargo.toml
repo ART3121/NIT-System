@@ -1,0 +1,14 @@
+[package]
+name = "nit-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Optional local AI integration for NIT System"
+
+[dependencies]
+anyhow.workspace = true
+nit-core = { path = "../nit-core" }
+serde.workspace = true
+serde_json.workspace = true

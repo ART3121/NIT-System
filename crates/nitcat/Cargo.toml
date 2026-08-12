@@ -1,0 +1,17 @@
+[package]
+name = "nitcat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Markdown and NIT Note reader for terminals"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+nit-core = { path = "../nit-core" }
+nit-editor = { path = "../nit-editor" }
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true

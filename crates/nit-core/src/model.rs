@@ -1,7 +1,7 @@
-pub(crate) const HORIZONS: [Horizon; 3] = [Horizon::Short, Horizon::Medium, Horizon::Long];
+pub const HORIZONS: [Horizon; 3] = [Horizon::Short, Horizon::Medium, Horizon::Long];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Kind {
+pub enum Kind {
     Idea,
     Note,
     Item,
@@ -9,7 +9,7 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    pub(crate) fn heading(self) -> &'static str {
+    pub fn heading(self) -> &'static str {
         match self {
             Self::Idea => "Ideas",
             Self::Note => "Notes",
@@ -18,7 +18,7 @@ impl Kind {
         }
     }
 
-    pub(crate) fn id_code(self) -> char {
+    pub fn id_code(self) -> char {
         match self {
             Self::Idea => 'I',
             Self::Note => 'N',
@@ -27,7 +27,7 @@ impl Kind {
         }
     }
 
-    pub(crate) fn uses_horizon(self) -> bool {
+    pub fn uses_horizon(self) -> bool {
         matches!(self, Self::Idea | Self::Todo)
     }
 }
@@ -48,14 +48,14 @@ impl std::fmt::Display for Kind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Horizon {
+pub enum Horizon {
     Short,
     Medium,
     Long,
 }
 
 impl Horizon {
-    pub(crate) fn heading(self) -> &'static str {
+    pub fn heading(self) -> &'static str {
         match self {
             Self::Short => "Short Term",
             Self::Medium => "Medium Term",
@@ -63,7 +63,7 @@ impl Horizon {
         }
     }
 
-    pub(crate) fn id_code(self) -> char {
+    pub fn id_code(self) -> char {
         match self {
             Self::Short => 'S',
             Self::Medium => 'M',
@@ -86,19 +86,19 @@ impl std::fmt::Display for Horizon {
     }
 }
 
-pub(crate) fn valid_classification(kind: Kind, horizon: Option<Horizon>) -> bool {
+pub fn valid_classification(kind: Kind, horizon: Option<Horizon>) -> bool {
     kind.uses_horizon() == horizon.is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct EntryId {
+pub struct EntryId {
     horizon: Option<Horizon>,
     kind: Kind,
     sequence: u64,
 }
 
 impl EntryId {
-    pub(crate) fn new(horizon: Option<Horizon>, kind: Kind, sequence: u64) -> Option<Self> {
+    pub fn new(horizon: Option<Horizon>, kind: Kind, sequence: u64) -> Option<Self> {
         (sequence > 0 && valid_classification(kind, horizon)).then_some(Self {
             horizon,
             kind,
@@ -106,7 +106,7 @@ impl EntryId {
         })
     }
 
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim().strip_prefix('@').unwrap_or(value.trim());
         let (classification, sequence) = value.split_once('-')?;
         if sequence.is_empty() || !sequence.chars().all(|character| character.is_ascii_digit()) {
@@ -124,19 +124,19 @@ impl EntryId {
         })
     }
 
-    pub(crate) fn horizon(self) -> Option<Horizon> {
+    pub fn horizon(self) -> Option<Horizon> {
         self.horizon
     }
 
-    pub(crate) fn kind(self) -> Kind {
+    pub fn kind(self) -> Kind {
         self.kind
     }
 
-    pub(crate) fn sequence(self) -> u64 {
+    pub fn sequence(self) -> u64 {
         self.sequence
     }
 
-    pub(crate) fn is_current(self) -> bool {
+    pub fn is_current(self) -> bool {
         valid_classification(self.kind, self.horizon)
     }
 }
@@ -157,7 +157,7 @@ impl std::fmt::Display for EntryId {
     }
 }
 
-pub(crate) fn classification_from_code(value: &str) -> Option<(Option<Horizon>, Kind)> {
+pub fn classification_from_code(value: &str) -> Option<(Option<Horizon>, Kind)> {
     let value = value.to_ascii_uppercase();
     match value.as_str() {
         "N" => Some((None, Kind::Note)),
@@ -199,36 +199,72 @@ pub(crate) fn legacy_classification_from_code(value: &str) -> Option<(Horizon, K
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RoadmapStep {
-    pub(crate) title: String,
-    pub(crate) description: String,
+pub struct RoadmapStep {
+    pub title: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Roadmap {
-    pub(crate) steps: Vec<RoadmapStep>,
+pub struct Roadmap {
+    pub steps: Vec<RoadmapStep>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Entry {
-    pub(crate) id: Option<EntryId>,
-    pub(crate) kind: Kind,
-    pub(crate) horizon: Option<Horizon>,
-    pub(crate) text: String,
-    pub(crate) roadmap: Option<Roadmap>,
+pub struct Entry {
+    pub id: Option<EntryId>,
+    pub kind: Kind,
+    pub horizon: Option<Horizon>,
+    pub text: String,
+    pub body: String,
+    pub roadmap: Option<Roadmap>,
 }
 
 impl Entry {
-    pub(crate) fn classification(&self) -> String {
+    pub fn classification(&self) -> String {
         self.horizon
             .map(|horizon| format!("{horizon}/{}", self.kind))
             .unwrap_or_else(|| self.kind.to_string())
     }
+
+    pub fn display_text(&self) -> String {
+        if self.body.is_empty() {
+            self.text.clone()
+        } else {
+            format!("{}\n\n{}", self.text, self.body)
+        }
+    }
+
+    pub fn matches_lowercase_query(&self, query: &str) -> bool {
+        text_matches(&self.text, query)
+            || text_matches(&self.body, query)
+            || self
+                .id
+                .is_some_and(|id| text_matches(&id.to_string(), query))
+            || self.roadmap.as_ref().is_some_and(|roadmap| {
+                roadmap.steps.iter().any(|step| {
+                    text_matches(&step.title, query) || text_matches(&step.description, query)
+                })
+            })
+    }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct Notes {
-    pub(crate) entries: Vec<Entry>,
+fn text_matches(value: &str, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
+        return true;
+    }
+    if lowercase_query.is_ascii() && value.is_ascii() {
+        value
+            .as_bytes()
+            .windows(lowercase_query.len())
+            .any(|window| window.eq_ignore_ascii_case(lowercase_query.as_bytes()))
+    } else {
+        value.to_lowercase().contains(lowercase_query)
+    }
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct Notes {
+    pub entries: Vec<Entry>,
 }
 
 #[cfg(test)]
@@ -268,5 +304,21 @@ mod tests {
     fn ids_expand_after_four_digits() {
         let id = EntryId::new(Some(Horizon::Long), Kind::Idea, 10_000).unwrap();
         assert_eq!(id.to_string(), "LI-10000");
+    }
+
+    #[test]
+    fn entry_search_avoids_combining_the_document_and_handles_unicode() {
+        let entry = Entry {
+            id: EntryId::new(None, Kind::Note, 42),
+            kind: Kind::Note,
+            horizon: None,
+            text: "Architecture".into(),
+            body: "Revisão técnica".into(),
+            roadmap: None,
+        };
+        assert!(entry.matches_lowercase_query("architecture"));
+        assert!(entry.matches_lowercase_query("revisão"));
+        assert!(entry.matches_lowercase_query("n-0042"));
+        assert!(!entry.matches_lowercase_query("missing"));
     }
 }

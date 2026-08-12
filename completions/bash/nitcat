@@ -1,0 +1,15 @@
+_nitcat() {
+    local current
+    current="${COMP_WORDS[COMP_CWORD]}"
+
+    if (( COMP_CWORD == 1 )); then
+        COMPREPLY=(
+            $(compgen -W "-help -version -completions $(nitcat -completion-ids 2>/dev/null)" -- "$current")
+            $(compgen -f -- "$current")
+        )
+    elif [[ "${COMP_WORDS[1]}" == "-completions" ]]; then
+        COMPREPLY=($(compgen -W "bash zsh fish" -- "$current"))
+    fi
+}
+
+complete -F _nitcat nitcat
