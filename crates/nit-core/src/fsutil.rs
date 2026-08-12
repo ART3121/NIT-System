@@ -1,5 +1,7 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs::{self, File, OpenOptions},
+    hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -83,7 +85,7 @@ const STORAGE_PATHS: [&str; 9] = [
 impl WorkspaceLock {
     pub(crate) fn exclusive(nit_dir: &Path) -> Result<Self> {
         fs::create_dir_all(nit_dir)?;
-        let path = nit_dir.join(".lock");
+        let path = lock_path(nit_dir)?;
         reject_symlink(&path)?;
         let file = OpenOptions::new()
             .read(true)
@@ -99,7 +101,7 @@ impl WorkspaceLock {
 
     pub(crate) fn shared(nit_dir: &Path) -> Result<Self> {
         fs::create_dir_all(nit_dir)?;
-        let path = nit_dir.join(".lock");
+        let path = lock_path(nit_dir)?;
         reject_symlink(&path)?;
         let file = OpenOptions::new()
             .read(true)
@@ -112,6 +114,17 @@ impl WorkspaceLock {
             .with_context(|| format!("could not lock workspace {}", nit_dir.display()))?;
         Ok(Self { file })
     }
+}
+
+fn lock_path(nit_dir: &Path) -> Result<PathBuf> {
+    let root = nit_dir
+        .parent()
+        .ok_or_else(|| anyhow!("workspace storage has no parent: {}", nit_dir.display()))?
+        .canonicalize()
+        .with_context(|| format!("could not resolve workspace for {}", nit_dir.display()))?;
+    let mut hasher = DefaultHasher::new();
+    root.as_os_str().hash(&mut hasher);
+    Ok(std::env::temp_dir().join(format!("nit-system-{:016x}.lock", hasher.finish())))
 }
 
 impl Drop for WorkspaceLock {
