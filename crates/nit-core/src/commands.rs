@@ -3,13 +3,15 @@ use std::{fs, path::Path};
 use anyhow::{bail, Context, Result};
 
 use crate::{
+    fsutil::WorkspaceLock,
     ids::IdSequences,
     model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap},
+    repository::{Repository, View},
     storage::{load, save, ACTIVE_TITLE, ARCHIVE_TITLE},
     workspace::Workspace,
 };
 
-pub(crate) fn text(parts: Vec<String>) -> Result<String> {
+pub fn text(parts: Vec<String>) -> Result<String> {
     let value = parts.join(" ").trim().to_owned();
     if value.is_empty() {
         bail!("text cannot be empty");
@@ -17,7 +19,7 @@ pub(crate) fn text(parts: Vec<String>) -> Result<String> {
     Ok(value)
 }
 
-pub(crate) fn capture_text(mut parts: Vec<String>) -> Result<(Kind, Option<Horizon>, String)> {
+pub fn capture_text(mut parts: Vec<String>) -> Result<(Kind, Option<Horizon>, String)> {
     let last = parts
         .last()
         .ok_or_else(|| anyhow::anyhow!("capture requires text followed by a code such as -n"))?;
@@ -30,7 +32,7 @@ pub(crate) fn capture_text(mut parts: Vec<String>) -> Result<(Kind, Option<Horiz
     Ok((kind, horizon, text(parts)?))
 }
 
-pub(crate) fn parse_capture_code(code: &str) -> Option<(Kind, Option<Horizon>)> {
+pub fn parse_capture_code(code: &str) -> Option<(Kind, Option<Horizon>)> {
     match code {
         "-n" => Some((Kind::Note, None)),
         "-x" => Some((Kind::Item, None)),
@@ -56,11 +58,12 @@ pub(crate) fn add(
         kind,
         horizon,
         text,
+        body: String::new(),
         roadmap: None,
     });
 }
 
-pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
+pub fn find_index(notes: &Notes, query: &str) -> Result<usize> {
     if let Some(id) = EntryId::parse(query) {
         return notes
             .entries
@@ -73,7 +76,9 @@ pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
         .entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| (entry.text.to_lowercase() == query).then_some(index))
+        .filter_map(|(index, entry)| {
+            (entry.display_text().to_lowercase() == query).then_some(index)
+        })
         .collect();
     let matches = if exact.is_empty() {
         notes
@@ -81,7 +86,11 @@ pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                entry.text.to_lowercase().contains(&query).then_some(index)
+                entry
+                    .display_text()
+                    .to_lowercase()
+                    .contains(&query)
+                    .then_some(index)
             })
             .collect()
     } else {
@@ -95,7 +104,7 @@ pub(crate) fn find_index(notes: &Notes, query: &str) -> Result<usize> {
 }
 
 pub(crate) fn roadmap_target(workspace: &Workspace, id: EntryId) -> Result<Entry> {
-    let notes = load(&workspace.notes_path())?;
+    let notes = Repository::open(workspace)?.load(View::Active)?;
     let entry = notes
         .entries
         .into_iter()
@@ -115,18 +124,20 @@ pub(crate) fn attach_roadmap(
     let id = expected
         .id
         .ok_or_else(|| anyhow::anyhow!("Roadmap targets require an entry ID"))?;
-    let path = workspace.notes_path();
-    let mut notes = load(&path)?;
-    let index = notes
-        .entries
-        .iter()
-        .position(|entry| entry.id == Some(id))
-        .ok_or_else(|| anyhow::anyhow!("active entry {id} no longer exists"))?;
-    if &notes.entries[index] != expected {
-        bail!("entry {id} changed while its Roadmap was being generated; nothing was saved");
-    }
-    notes.entries[index].roadmap = Some(roadmap);
-    save(&path, &notes, ACTIVE_TITLE)
+    let repository = Repository::open(workspace)?;
+    repository.exclusive(|repository| {
+        let mut notes = repository.load_unlocked(View::Active)?;
+        let index = notes
+            .entries
+            .iter()
+            .position(|entry| entry.id == Some(id))
+            .ok_or_else(|| anyhow::anyhow!("active entry {id} no longer exists"))?;
+        if &notes.entries[index] != expected {
+            bail!("entry {id} changed while its Roadmap was being generated; nothing was saved");
+        }
+        notes.entries[index].roadmap = Some(roadmap);
+        repository.save_unlocked(View::Active, &notes)
+    })
 }
 
 pub(crate) fn create(
@@ -135,78 +146,73 @@ pub(crate) fn create(
     horizon: Option<Horizon>,
     value: String,
 ) -> Result<EntryId> {
-    let active_path = workspace.notes_path();
-    let archived_path = workspace.archive_path();
-    let mut active = load(&active_path)?;
-    let archived = load(&archived_path)?;
-    IdSequences::require_all_ids([&active, &archived])?;
-    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
-    sequences.reconcile([&active, &archived])?;
-    let id = sequences.allocate(horizon, kind)?;
-    add(&mut active, Some(id), kind, horizon, value);
-    save(&active_path, &active, ACTIVE_TITLE)?;
-    sequences.save(&workspace.next_ids_path())?;
-    Ok(id)
+    let repository = Repository::open(workspace)?;
+    repository.exclusive(|repository| {
+        let (mut active, archived) = repository.all_unlocked()?;
+        IdSequences::require_all_ids([&active, &archived])?;
+        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+        sequences.reconcile([&active, &archived])?;
+        let id = sequences.allocate(horizon, kind)?;
+        add(&mut active, Some(id), kind, horizon, value);
+        repository.save_unlocked(View::Active, &active)?;
+        sequences.save(&workspace.next_ids_path())?;
+        Ok(id)
+    })
 }
 
 pub(crate) fn archive_entry(workspace: &Workspace, query: &str) -> Result<()> {
-    let active_path = workspace.notes_path();
-    let archived_path = workspace.archive_path();
-    let mut active = load(&active_path)?;
-    let mut archived = load(&archived_path)?;
-    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
-    sequences.reconcile([&active, &archived])?;
-    let index = find_index(&active, query)?;
-    let entry = active.entries.remove(index);
-    archived.entries.push(entry);
-    save(&archived_path, &archived, ARCHIVE_TITLE)?;
-    save(&active_path, &active, ACTIVE_TITLE)?;
-    println!("Archived.");
+    let repository = Repository::open(workspace)?;
+    repository.exclusive(|repository| {
+        let (mut active, mut archived) = repository.all_unlocked()?;
+        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+        sequences.reconcile([&active, &archived])?;
+        let index = find_index(&active, query)?;
+        let entry = active.entries.remove(index);
+        archived.entries.push(entry);
+        repository.save_both_unlocked(&active, &archived)
+    })?;
     Ok(())
 }
 
 pub(crate) fn import_notes(workspace: &Workspace, source: &Path) -> Result<usize> {
-    let target = workspace.notes_path();
     let source_notes = load(source)?;
     if source_notes.entries.is_empty() {
         bail!("no entries found; import files using the NIT headings and '- text' entries");
     }
-    let same_file = source == target;
-    if same_file {
-        let backup = target.with_file_name(format!("notes.import.{}.bak", std::process::id()));
-        fs::copy(source, &backup)
-            .with_context(|| format!("could not create backup {}", backup.display()))?;
-        save(&target, &source_notes, ACTIVE_TITLE)?;
-        return Ok(source_notes.entries.len());
-    }
-
-    let archived = load(&workspace.archive_path())?;
-    let mut target_notes = load(&target)?;
-    IdSequences::require_all_ids([&target_notes, &archived])?;
-    let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+    let repository = Repository::open(workspace)?;
     let imported_count = source_notes.entries.len();
-    let mut imported = source_notes;
-    for entry in &mut imported.entries {
-        if entry.id.is_some_and(|id| !id.is_current()) {
-            entry.id = None;
+    repository.exclusive(|repository| {
+        let (mut target_notes, archived) = repository.all_unlocked()?;
+        IdSequences::require_all_ids([&target_notes, &archived])?;
+        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+        let mut imported = source_notes;
+        for entry in &mut imported.entries {
+            if entry.id.is_some_and(|id| !id.is_current()) {
+                entry.id = None;
+            }
         }
-    }
-    sequences.reconcile([&target_notes, &archived, &imported])?;
-    for entry in &mut imported.entries {
-        if entry.id.is_none() {
-            entry.id = Some(sequences.allocate(entry.horizon, entry.kind)?);
+        sequences.reconcile([&target_notes, &archived, &imported])?;
+        for entry in &mut imported.entries {
+            if entry.id.is_none() {
+                entry.id = Some(sequences.allocate(entry.horizon, entry.kind)?);
+            }
         }
-    }
-    target_notes.entries.extend(imported.entries);
-    sequences.reconcile([&target_notes, &archived])?;
-    save(&target, &target_notes, ACTIVE_TITLE)?;
-    sequences.save(&workspace.next_ids_path())?;
+        target_notes.entries.extend(imported.entries);
+        sequences.reconcile([&target_notes, &archived])?;
+        repository.save_unlocked(View::Active, &target_notes)?;
+        sequences.save(&workspace.next_ids_path())
+    })?;
     Ok(imported_count)
 }
 
 pub(crate) fn migrate_timeless_ids(workspace: &Workspace) -> Result<usize> {
-    let notes_path = workspace.notes_path();
-    let archive_path = workspace.archive_path();
+    if !workspace.legacy_notes_path().is_file() {
+        Repository::open(workspace)?;
+        return Ok(0);
+    }
+    let _lock = WorkspaceLock::exclusive(&workspace.nit_dir())?;
+    let notes_path = workspace.legacy_notes_path();
+    let archive_path = workspace.legacy_archive_path();
     let sequence_path = workspace.next_ids_path();
     let mut active = load(&notes_path)?;
     let mut archived = load(&archive_path)?;
@@ -253,8 +259,13 @@ pub(crate) fn migrate_timeless_ids(workspace: &Workspace) -> Result<usize> {
 }
 
 pub(crate) fn assign_missing_ids(workspace: &Workspace) -> Result<usize> {
-    let notes_path = workspace.notes_path();
-    let archive_path = workspace.archive_path();
+    if !workspace.legacy_notes_path().is_file() {
+        Repository::open(workspace)?;
+        return Ok(0);
+    }
+    let _lock = WorkspaceLock::exclusive(&workspace.nit_dir())?;
+    let notes_path = workspace.legacy_notes_path();
+    let archive_path = workspace.legacy_archive_path();
     let mut active = load(&notes_path)?;
     let mut archived = load(&archive_path)?;
     let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
@@ -353,7 +364,12 @@ mod tests {
         };
         attach_roadmap(&workspace, &target, roadmap.clone()).unwrap();
         assert_eq!(
-            load(&workspace.notes_path()).unwrap().entries[0].roadmap,
+            Repository::open(&workspace)
+                .unwrap()
+                .load(View::Active)
+                .unwrap()
+                .entries[0]
+                .roadmap,
             Some(roadmap)
         );
 

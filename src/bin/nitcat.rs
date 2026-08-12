@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    nit_cli::run()
+    nitcat::run_cli()
 }

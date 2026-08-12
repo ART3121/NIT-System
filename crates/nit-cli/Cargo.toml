@@ -1,0 +1,15 @@
+[package]
+name = "nit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for NIT System"
+
+[dependencies]
+anyhow.workspace = true
+nit-ai = { path = "../nit-ai" }
+nit-core = { path = "../nit-core" }
+nit-editor = { path = "../nit-editor" }
+nit-tui = { path = "../nit-tui" }

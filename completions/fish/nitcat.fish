@@ -1,0 +1,5 @@
+complete -c nitcat -a '-help' -d 'Show help'
+complete -c nitcat -a '-version' -d 'Show version'
+complete -c nitcat -a '-completions' -d 'Generate shell completions'
+complete -c nitcat -a '(nitcat -completion-ids 2>/dev/null)' -d 'NIT Note ID'
+complete -c nitcat -n '__fish_seen_subcommand_from -completions' -f -a 'bash zsh fish'

@@ -1,0 +1,18 @@
+[package]
+name = "nit-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Interactive terminal interface for NIT System"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+nit-ai = { path = "../nit-ai" }
+nit-core = { path = "../nit-core" }
+nit-editor = { path = "../nit-editor" }
+nitcat = { path = "../nitcat" }
+ratatui.workspace = true
+unicode-width.workspace = true

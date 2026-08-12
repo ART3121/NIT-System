@@ -1,7 +1,8 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{bail, Context, Result};
 
+use crate::fsutil::{atomic_write, read_text_limited, MAX_STORAGE_BYTES};
 use crate::model::{
     classification_from_code, legacy_classification_from_code, EntryId, Horizon, Kind, Notes,
 };
@@ -26,20 +27,13 @@ impl IdSequences {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let source = fs::read_to_string(path)
+        let source = read_text_limited(path, MAX_STORAGE_BYTES)
             .with_context(|| format!("could not read ID sequences from {}", path.display()))?;
         Self::parse(&source).with_context(|| format!("could not parse {}", path.display()))
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("ID sequence path has no parent"))?;
-        let temporary = parent.join("next-ids.tmp");
-        fs::write(&temporary, self.render())
-            .with_context(|| format!("could not write {}", temporary.display()))?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("could not replace {}", path.display()))
+        atomic_write(path, self.render())
     }
 
     pub(crate) fn reconcile<'a>(
@@ -233,6 +227,7 @@ mod tests {
                 horizon: Some(Horizon::Long),
                 kind: Kind::Idea,
                 text: "existing".into(),
+                body: String::new(),
                 roadmap: None,
             }],
         };
@@ -264,6 +259,7 @@ mod tests {
             horizon: None,
             kind: Kind::Note,
             text: "first".into(),
+            body: String::new(),
             roadmap: None,
         };
         assert!(IdSequences::default()

@@ -5,18 +5,36 @@ use std::{
 
 use anyhow::{bail, Result};
 
-use crate::{
-    ai::{generate_roadmap, roadmap_text, GenerateOutcome},
-    commands::{
-        archive_entry, assign_missing_ids, attach_roadmap, capture_text, create, find_index,
-        import_notes, migrate_timeless_ids, parse_capture_code, roadmap_target, text,
-    },
-    editor,
-    model::{EntryId, Horizon, Kind},
-    storage::{load, render_notes, save, ACTIVE_TITLE, ARCHIVE_TITLE},
-    tui,
-    workspace::{appears_ignored, ensure_private, migrate, Workspace},
+use nit_ai::{generate_roadmap, roadmap_text, GenerateOutcome};
+use nit_core::{
+    appears_ignored, capture_text, ensure_private, find_index, migrate, parse_capture_code,
+    render_notes, text, EntryId, Horizon, Kind, Nit, View, Workspace, ACTIVE_TITLE, ARCHIVE_TITLE,
 };
+use nit_editor as editor;
+use nit_tui as tui;
+
+fn write_stdout(arguments: std::fmt::Arguments<'_>) -> Result<()> {
+    match io::stdout().lock().write_fmt(arguments) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+macro_rules! print {
+    ($($argument:tt)*) => {{
+        write_stdout(format_args!($($argument)*))?;
+    }};
+}
+
+macro_rules! println {
+    () => {{
+        write_stdout(format_args!("\n"))?;
+    }};
+    ($($argument:tt)*) => {{
+        write_stdout(format_args!("{}\n", format_args!($($argument)*)))?;
+    }};
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum InitMode {
@@ -37,6 +55,12 @@ enum Action {
     AssignIds,
     MigrateTimeless,
     AiRoadmap(EntryId),
+    Search {
+        query: Vec<String>,
+        classification: Option<(Kind, Option<Horizon>)>,
+        archived: bool,
+        all: bool,
+    },
     List {
         classification: Option<(Kind, Option<Horizon>)>,
         archived: bool,
@@ -51,11 +75,31 @@ enum Action {
     },
     Archive(Vec<String>),
     Import(PathBuf),
+    Completions(CompletionShell),
+    CompletionIds,
     Help,
     Version,
 }
 
-pub(crate) fn run() -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl CompletionShell {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "bash" => Some(Self::Bash),
+            "zsh" => Some(Self::Zsh),
+            "fish" => Some(Self::Fish),
+            _ => None,
+        }
+    }
+}
+
+pub fn run() -> Result<()> {
     let arguments = std::env::args().skip(1).collect();
     execute(parse_arguments(arguments)?)
 }
@@ -76,13 +120,15 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
         "-migrate-timeless" => {
             no_arguments(remaining, Action::MigrateTimeless, "nit -migrate-timeless")
         }
+        "-v" => bail!("`nit -v` was removed in 0.4.0; use `nitcat <NOTE-ID>`"),
         "-ai-roadmap" => match remaining {
             [id] => EntryId::parse(id)
                 .map(Action::AiRoadmap)
                 .ok_or_else(|| anyhow::anyhow!("usage: nit -ai-roadmap <ID>")),
             _ => bail!("usage: nit -ai-roadmap <ID>"),
         },
-        "-list" => parse_list(remaining),
+        "-search" => parse_search(remaining),
+        "-ls" => parse_list(remaining),
         "-show" => {
             let (query, archived) = query_options(remaining)?;
             Ok(Action::Show { query, archived })
@@ -96,6 +142,13 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
             [path] => Ok(Action::Import(PathBuf::from(path))),
             _ => bail!("usage: nit -import <path>"),
         },
+        "-completions" => match remaining {
+            [shell] => CompletionShell::parse(shell)
+                .map(Action::Completions)
+                .ok_or_else(|| anyhow::anyhow!("usage: nit -completions <bash|zsh|fish>")),
+            _ => bail!("usage: nit -completions <bash|zsh|fish>"),
+        },
+        "-completion-ids" => no_arguments(remaining, Action::CompletionIds, "nit -completion-ids"),
         "-tui" => no_arguments(remaining, Action::Tui, "nit -tui"),
         "-help" | "--help" | "-h" => Ok(Action::Help),
         "-version" | "--version" | "-V" => Ok(Action::Version),
@@ -134,10 +187,10 @@ fn parse_list(arguments: &[String]) -> Result<Action> {
             archived = true;
         } else if let Some(value) = parse_capture_code(argument) {
             if classification.replace(value).is_some() {
-                bail!("provide only one classification code to -list");
+                bail!("provide only one classification code to -ls");
             }
         } else {
-            bail!("unknown -list argument '{argument}'; use a code such as -n or --archived");
+            bail!("unknown -ls argument '{argument}'; use a code such as -n or --archived");
         }
     }
 
@@ -163,6 +216,64 @@ fn query_options(arguments: &[String]) -> Result<(Vec<String>, bool)> {
     Ok((query, archived))
 }
 
+fn parse_search(arguments: &[String]) -> Result<Action> {
+    let mut query = Vec::new();
+    let mut classification = None;
+    let mut archived = false;
+    let mut all = false;
+    for argument in arguments {
+        if argument == "--archived" {
+            archived = true;
+        } else if argument == "--all" {
+            all = true;
+        } else if let Some(value) = parse_capture_code(argument) {
+            if classification.replace(value).is_some() {
+                bail!("provide only one classification code to -search");
+            }
+        } else {
+            query.push(argument.clone());
+        }
+    }
+    if archived && all {
+        bail!("--archived and --all cannot be combined");
+    }
+    if query.is_empty() {
+        bail!("usage: nit -search <query> [code] [--archived|--all]");
+    }
+    Ok(Action::Search {
+        query,
+        classification,
+        archived,
+        all,
+    })
+}
+
+fn apply_edited_text(entry: &mut nit_core::Entry, edited: &str) -> Result<()> {
+    if entry.kind != Kind::Note {
+        let value = edited.trim().to_owned();
+        if value.is_empty() {
+            bail!("entry text cannot be empty");
+        }
+        entry.text = value;
+        return Ok(());
+    }
+    let normalized = edited.replace("\r\n", "\n");
+    let mut lines = normalized.lines();
+    let title = lines
+        .next()
+        .and_then(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Note must start with '# <title>'"))?;
+    entry.text = title.to_owned();
+    entry.body = lines
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_owned();
+    Ok(())
+}
+
 fn execute(action: Action) -> Result<()> {
     match action {
         Action::Init(mode) => initialize(mode),
@@ -175,16 +286,44 @@ fn execute(action: Action) -> Result<()> {
             Ok(())
         }
         Action::Help => {
-            print_help();
+            print_help()?;
             Ok(())
         }
         Action::Version => {
             println!("nit {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        action => {
+        Action::Completions(shell) => {
+            print!("{}", completion_script(shell));
+            Ok(())
+        }
+        Action::AssignIds => {
             let workspace = Workspace::discover()?;
-            execute_in_workspace(action, &workspace)
+            let assigned = Nit::assign_missing_ids_in(&workspace)?;
+            if assigned == 0 {
+                println!("All entries already have IDs.");
+            } else {
+                println!("Assigned IDs to {assigned} entries.");
+                println!("Backups: notes.pre-ids.bak, archive.pre-ids.bak");
+            }
+            Ok(())
+        }
+        Action::MigrateTimeless => {
+            let workspace = Workspace::discover()?;
+            let migrated = Nit::migrate_timeless_ids_in(&workspace)?;
+            if migrated == 0 {
+                println!("All Note and Item IDs are already timeless.");
+            } else {
+                println!("Migrated {migrated} Note/Item IDs to timeless IDs.");
+                println!(
+                    "Backups: notes.pre-timeless.bak, archive.pre-timeless.bak, next-ids.pre-timeless.bak"
+                );
+            }
+            Ok(())
+        }
+        action => {
+            let nit = Nit::discover()?;
+            execute_in_workspace(action, &nit)
         }
     }
 }
@@ -214,58 +353,74 @@ fn initialize(mode: InitMode) -> Result<()> {
     Ok(())
 }
 
-fn execute_in_workspace(action: Action, workspace: &Workspace) -> Result<()> {
+fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
+    let workspace = nit.workspace();
     match action {
-        Action::Tui => tui::run(workspace)?,
+        Action::Tui => tui::run(nit)?,
         Action::Capture(message) => {
             let (kind, horizon, value) = capture_text(message)?;
-            let id = create(workspace, kind, horizon, value)?;
+            let id = nit.create(kind, horizon, value)?;
             println!("Added {id} ({}).", classification_label(kind, horizon));
         }
         Action::Root => println!("{}", workspace.root().display()),
         Action::Path => println!("{}", workspace.nit_dir().display()),
         Action::Status => {
-            let active = load(&workspace.notes_path())?;
-            let archived = load(&workspace.archive_path())?;
+            let status = nit.status()?;
             println!(
                 "NIT Workspace\n\nRoot: {}\nStorage: {}\nActive entries: {}\nArchived entries: {}",
                 workspace.root().display(),
                 workspace.nit_dir().display(),
-                active.entries.len(),
-                archived.entries.len()
+                status.active_entries,
+                status.archived_entries
             );
         }
-        Action::AssignIds => {
-            let assigned = assign_missing_ids(workspace)?;
-            if assigned == 0 {
-                println!("All entries already have IDs.");
+        Action::AiRoadmap(id) => execute_ai_roadmap(nit, id)?,
+        Action::Search {
+            query,
+            classification,
+            archived,
+            all,
+        } => {
+            let query = text(query)?;
+            let views = if all {
+                vec![View::Active, View::Archived]
+            } else if archived {
+                vec![View::Archived]
             } else {
-                println!("Assigned IDs to {assigned} entries.");
-                println!("Backups: notes.pre-ids.bak, archive.pre-ids.bak");
-            }
-        }
-        Action::MigrateTimeless => {
-            let migrated = migrate_timeless_ids(workspace)?;
-            if migrated == 0 {
-                println!("All Note and Item IDs are already timeless.");
-            } else {
-                println!("Migrated {migrated} Note/Item IDs to timeless IDs.");
+                vec![View::Active]
+            };
+            for (view, entry) in nit.search(&query, &views, classification)? {
                 println!(
-                    "Backups: notes.pre-timeless.bak, archive.pre-timeless.bak, next-ids.pre-timeless.bak"
+                    "{} · {} · {}{}",
+                    entry
+                        .id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    entry.classification(),
+                    entry.text,
+                    if view == View::Archived {
+                        " · archived"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
-        Action::AiRoadmap(id) => execute_ai_roadmap(workspace, id)?,
         Action::List {
             classification,
             archived,
         } => {
-            let storage = if archived {
-                workspace.archive_path()
+            let mut notes = nit.load(if archived {
+                View::Archived
             } else {
-                workspace.notes_path()
-            };
-            let notes = load(&storage)?;
+                View::Active
+            })?;
+            for entry in &mut notes.entries {
+                if entry.kind == Kind::Note {
+                    entry.body.clear();
+                    entry.roadmap = None;
+                }
+            }
             let (kind, horizon) = classification
                 .map(|(kind, horizon)| (Some(kind), horizon))
                 .unwrap_or((None, None));
@@ -284,12 +439,11 @@ fn execute_in_workspace(action: Action, workspace: &Workspace) -> Result<()> {
             );
         }
         Action::Show { query, archived } => {
-            let storage = if archived {
-                workspace.archive_path()
+            let notes = nit.load(if archived {
+                View::Archived
             } else {
-                workspace.notes_path()
-            };
-            let notes = load(&storage)?;
+                View::Active
+            })?;
             let query = text(query)?;
             let entry = &notes.entries[find_index(&notes, &query)?];
             println!(
@@ -299,52 +453,72 @@ fn execute_in_workspace(action: Action, workspace: &Workspace) -> Result<()> {
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "No ID".into()),
                 entry.classification(),
-                entry.text
+                entry.display_text()
             );
             if let Some(roadmap) = &entry.roadmap {
                 println!("\nRoadmap\n\n{}", roadmap_text(roadmap));
             }
         }
         Action::Edit { query, archived } => {
-            let storage = if archived {
-                workspace.archive_path()
+            let view = if archived {
+                View::Archived
             } else {
-                workspace.notes_path()
+                View::Active
             };
-            let mut notes = load(&storage)?;
+            let mut notes = nit.load(view)?;
             let query = text(query)?;
             let index = find_index(&notes, &query)?;
-            notes.entries[index].text = editor::open(&notes.entries[index].text)?;
-            save(
-                &storage,
-                &notes,
-                if archived {
-                    ARCHIVE_TITLE
-                } else {
-                    ACTIVE_TITLE
-                },
-            )?;
+            let edited = if notes.entries[index].kind == Kind::Note {
+                editor::open(&format!(
+                    "# {}\n\n{}",
+                    notes.entries[index].text, notes.entries[index].body
+                ))?
+            } else {
+                editor::open(&notes.entries[index].text)?
+            };
+            apply_edited_text(&mut notes.entries[index], &edited)?;
+            nit.save(view, &notes)?;
             println!("Updated.");
         }
-        Action::Archive(query) => archive_entry(workspace, &text(query)?)?,
+        Action::Archive(query) => {
+            nit.archive(&text(query)?)?;
+            println!("Archived.");
+        }
         Action::Import(source) => {
             let source = if source.is_absolute() {
                 source
             } else {
                 std::env::current_dir()?.join(source)
             };
-            let imported = import_notes(workspace, &source)?;
+            let imported = nit.import(&source)?;
             println!("Imported {imported} entries.");
         }
-        Action::Init(_) | Action::Migrate | Action::Help | Action::Version => {
+        Action::CompletionIds => {
+            let (active, archived) = nit.all()?;
+            for id in active
+                .entries
+                .iter()
+                .chain(&archived.entries)
+                .filter_map(|entry| entry.id)
+            {
+                println!("{id}");
+            }
+        }
+        Action::Init(_)
+        | Action::Migrate
+        | Action::AssignIds
+        | Action::MigrateTimeless
+        | Action::Completions(_)
+        | Action::Help
+        | Action::Version => {
             unreachable!("non-workspace action reached workspace dispatcher")
         }
     }
     Ok(())
 }
 
-fn execute_ai_roadmap(workspace: &Workspace, id: EntryId) -> Result<()> {
-    let entry = roadmap_target(workspace, id)?;
+fn execute_ai_roadmap(nit: &Nit, id: EntryId) -> Result<()> {
+    let entry = nit.roadmap_target(id)?;
     println!("Preparing local Ollama and generating a Roadmap for {id}…");
     io::stdout().flush()?;
     let roadmap = match generate_roadmap(&entry, false)? {
@@ -371,7 +545,7 @@ fn execute_ai_roadmap(workspace: &Workspace, id: EntryId) -> Result<()> {
     };
     println!("\nRoadmap for {id}\n\n{}\n", roadmap_text(&roadmap));
     if confirm(&format!("Attach this Roadmap to {id}?"))? {
-        attach_roadmap(workspace, &entry, roadmap)?;
+        nit.attach_roadmap(&entry, roadmap)?;
         println!("Roadmap attached to {id}.");
     } else {
         println!("Roadmap discarded; no files were changed.");
@@ -396,12 +570,47 @@ fn classification_label(kind: Kind, horizon: Option<Horizon>) -> String {
         .unwrap_or_else(|| kind.to_string())
 }
 
-fn print_help() {
+fn print_help() -> Result<()> {
     println!(
-        "NIT System terminal notes\n\n\
-Usage:\n  nit                                      Open the TUI\n  nit <text> -<code>                       Capture an entry\n  nit -init [--private|--tracked]          Create a workspace\n  nit -migrate                             Migrate legacy files\n  nit -assign-ids                          Assign IDs to existing entries\n  nit -migrate-timeless                    Convert timed Note/Item IDs safely\n  nit -ai-roadmap <ID>                     Generate a local AI Roadmap\n  nit -root                                Print the workspace root\n  nit -path                                Print the .nit directory\n  nit -status                              Show workspace statistics\n  nit -list [code] [--archived]            List entries\n  nit -show <text> [--archived]            Show one entry\n  nit -edit <text> [--archived]            Edit one entry\n  nit -archive <text>                      Archive one entry\n  nit -import <path>                       Import notes\n  nit -tui                                 Open the TUI explicitly\n  nit -help                                Show this help\n  nit -version                             Show the version\n\n\
-Capture codes:\n  Ideas:     -si short  -mi medium  -li long\n  To-dos:   -st short  -mt medium  -lt long\n  Timeless: -n note    -x item"
+        r#"NIT System terminal notes
+
+Usage:
+  nit                                      Open the TUI
+  nit <text> -<code>                       Capture an entry
+  nit -init [--private|--tracked]          Create a workspace
+  nit -migrate                             Migrate legacy files
+  nit -assign-ids                          Assign IDs to existing entries
+  nit -migrate-timeless                    Convert timed Note/Item IDs safely
+  nit -ai-roadmap <ID>                     Generate a local AI Roadmap
+  nit -root                                Print the workspace root
+  nit -path                                Print the .nit directory
+  nit -status                              Show workspace statistics
+  nit -search <text> [code] [--archived|--all]
+                                           Search titles, bodies, IDs, and Roadmaps
+  nit -ls [code] [--archived]              List entries (Notes: ID and title only)
+  nit -show <text> [--archived]            Show one entry
+  nit -edit <text> [--archived]            Edit one entry
+  nit -archive <text>                      Archive one entry
+  nit -import <path>                       Import entries
+  nit -completions <bash|zsh|fish>         Generate shell completions
+  nit -tui                                 Open the TUI explicitly
+  nit -help                                Show this help
+  nit -version                             Show the version
+
+Capture codes:
+  Ideas:     -si short  -mi medium  -li long
+  To-dos:   -st short  -mt medium  -lt long
+  Timeless: -n note    -x item"#
     );
+    Ok(())
+}
+
+fn completion_script(shell: CompletionShell) -> &'static str {
+    match shell {
+        CompletionShell::Bash => include_str!("../../../completions/bash/nit"),
+        CompletionShell::Zsh => include_str!("../../../completions/zsh/_nit"),
+        CompletionShell::Fish => include_str!("../../../completions/fish/nit.fish"),
+    }
 }
 
 #[cfg(test)]
@@ -460,15 +669,34 @@ mod tests {
     }
 
     #[test]
+    fn removed_viewer_command_points_to_nitcat() {
+        let error = parse_arguments(words(&["-v", "N-0001"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nitcat"));
+    }
+
+    #[test]
     fn list_filters_use_combined_codes() {
         assert_eq!(
-            parse_arguments(words(&["-list", "-n", "--archived"])).unwrap(),
+            parse_arguments(words(&["-ls", "-n", "--archived"])).unwrap(),
             Action::List {
                 classification: Some((Kind::Note, None)),
                 archived: true,
             }
         );
-        assert!(parse_arguments(words(&["-list", "note"])).is_err());
+        assert!(parse_arguments(words(&["-ls", "note"])).is_err());
+        assert!(parse_arguments(words(&["-list"])).is_err());
+    }
+
+    #[test]
+    fn completion_generation_does_not_require_a_workspace() {
+        assert_eq!(
+            parse_arguments(words(&["-completions", "fish"])).unwrap(),
+            Action::Completions(CompletionShell::Fish)
+        );
+        assert!(completion_script(CompletionShell::Bash).contains("complete -F _nit nit"));
+        assert!(parse_arguments(words(&["-completions", "powershell"])).is_err());
     }
 
     #[test]

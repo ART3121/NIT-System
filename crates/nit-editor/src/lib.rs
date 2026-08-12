@@ -1,16 +1,39 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs::{self, File},
+    io::{Read, Write},
+    path::Path,
+    process::Command,
+};
 
 use anyhow::{bail, Context, Result};
 
 const SUPPORTED_EDITORS: [&str; 4] = ["nvim", "vim", "vi", "nano"];
+const MAX_EDIT_BYTES: u64 = 16 * 1024 * 1024;
 
-pub(crate) fn open(initial: &str) -> Result<String> {
-    let path = std::env::temp_dir().join(format!("nit-edit-{}.md", std::process::id()));
-    fs::write(&path, initial)?;
+pub fn open(initial: &str) -> Result<String> {
+    let mut temporary = tempfile::Builder::new()
+        .prefix("nit-edit-")
+        .suffix(".md")
+        .tempfile()
+        .context("could not create a private editor file")?;
+    temporary.write_all(initial.as_bytes())?;
+    temporary.flush()?;
+    let path = temporary.path();
 
     let edit_result = (|| -> Result<String> {
-        launch(&path, &SUPPORTED_EDITORS)?;
-        let edited = fs::read_to_string(&path)?;
+        launch(path, &SUPPORTED_EDITORS)?;
+        let metadata = fs::metadata(path)?;
+        if metadata.len() > MAX_EDIT_BYTES {
+            bail!("edited document exceeds the {} byte limit", MAX_EDIT_BYTES);
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        File::open(path)?
+            .take(MAX_EDIT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_EDIT_BYTES {
+            bail!("edited document exceeds the {} byte limit", MAX_EDIT_BYTES);
+        }
+        let edited = String::from_utf8(bytes).context("edited document is not valid UTF-8")?;
         let edited = edited.trim().to_owned();
         if edited.is_empty() {
             bail!("refusing to save an empty entry");
@@ -18,7 +41,6 @@ pub(crate) fn open(initial: &str) -> Result<String> {
         Ok(edited)
     })();
 
-    let _ = fs::remove_file(&path);
     edit_result
 }
 

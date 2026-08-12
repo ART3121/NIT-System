@@ -1,0 +1,58 @@
+#compdef nit
+
+_nit() {
+    local command
+    local -a commands codes ids
+    commands=(
+        '-init:Create a workspace'
+        '-migrate:Migrate legacy storage'
+        '-assign-ids:Assign missing IDs'
+        '-migrate-timeless:Migrate legacy timed IDs'
+        '-ai-roadmap:Generate an AI Roadmap'
+        '-root:Print workspace root'
+        '-path:Print storage path'
+        '-status:Show workspace statistics'
+        '-search:Search entries'
+        '-ls:List entries'
+        '-show:Show an entry'
+        '-edit:Edit an entry'
+        '-archive:Archive an entry'
+        '-import:Import entries'
+        '-completions:Generate shell completions'
+        '-tui:Open the TUI'
+        '-help:Show help'
+        '-version:Show version'
+    )
+    codes=(
+        '-si:Short-term Idea' '-mi:Medium-term Idea' '-li:Long-term Idea'
+        '-st:Short-term To-do' '-mt:Medium-term To-do' '-lt:Long-term To-do'
+        '-n:Note' '-x:Item'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe 'NIT command or capture code' commands
+        _describe 'capture code' codes
+        return
+    fi
+
+    command="$words[2]"
+    case "$command" in
+        -init) _values 'workspace mode' --private --tracked ;;
+        -ls) _describe 'classification' codes; _values 'option' --archived ;;
+        -search) _describe 'classification' codes; _values 'option' --archived --all ;;
+        -show|-edit)
+            ids=("${(@f)$(nit -completion-ids 2>/dev/null)}")
+            _describe 'entry ID' ids
+            _values 'option' --archived
+            ;;
+        -archive|-ai-roadmap)
+            ids=("${(@f)$(nit -completion-ids 2>/dev/null)}")
+            _describe 'entry ID' ids
+            ;;
+        -import) _files ;;
+        -completions) _values 'shell' bash zsh fish ;;
+        *) _describe 'capture code' codes ;;
+    esac
+}
+
+_nit "$@"

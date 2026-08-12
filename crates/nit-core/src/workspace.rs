@@ -6,7 +6,14 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use crate::{
+    fsutil::{
+        atomic_write, ensure_regular_or_missing, read_text_limited, reject_symlink,
+        temporary_directory,
+    },
     ids::IdSequences,
     model::Notes,
     storage::{load, render_notes, ACTIVE_TITLE, ARCHIVE_TITLE},
@@ -15,28 +22,33 @@ use crate::{
 const NIT_DIRECTORY: &str = ".nit";
 const NOTES_FILE: &str = "notes";
 const ARCHIVE_FILE: &str = "archive";
+const IDEAS_FILE: &str = "ideas";
+const ITEMS_FILE: &str = "items";
+const TODOS_FILE: &str = "todos";
 const NEXT_IDS_FILE: &str = "next-ids";
 const LEGACY_NOTES_FILE: &str = ".notes";
 const LEGACY_ARCHIVE_FILE: &str = ".notes.archive";
 const LEGACY_NOTES_BACKUP: &str = ".notes.legacy.bak";
 const LEGACY_ARCHIVE_BACKUP: &str = ".notes.archive.legacy.bak";
+const MAX_GITIGNORE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Workspace {
+pub struct Workspace {
     root: PathBuf,
+    nit_dir_override: Option<PathBuf>,
 }
 
-pub(crate) struct InitResult {
-    pub(crate) workspace: Workspace,
-    pub(crate) already_existed: bool,
+pub struct InitResult {
+    pub workspace: Workspace,
+    pub already_existed: bool,
 }
 
 impl Workspace {
-    pub(crate) fn discover() -> Result<Self> {
+    pub fn discover() -> Result<Self> {
         Self::discover_from(&std::env::current_dir()?)
     }
 
-    pub(crate) fn discover_from(path: &Path) -> Result<Self> {
+    pub fn discover_from(path: &Path) -> Result<Self> {
         let original = path
             .canonicalize()
             .with_context(|| format!("could not resolve {}", path.display()))?;
@@ -49,9 +61,12 @@ impl Workspace {
         };
 
         for candidate in start.ancestors() {
-            if candidate.join(NIT_DIRECTORY).is_dir() {
+            let nit_dir = candidate.join(NIT_DIRECTORY);
+            reject_symlink(&nit_dir)?;
+            if nit_dir.is_dir() {
                 return Ok(Self {
                     root: candidate.to_path_buf(),
+                    nit_dir_override: None,
                 });
             }
         }
@@ -62,7 +77,7 @@ impl Workspace {
         bail!("No NIT workspace found.\nRun `nit -init` to create one.")
     }
 
-    pub(crate) fn init(path: &Path) -> Result<InitResult> {
+    pub fn init(path: &Path) -> Result<InitResult> {
         let root = path
             .canonicalize()
             .with_context(|| format!("could not resolve {}", path.display()))?;
@@ -70,8 +85,12 @@ impl Workspace {
             bail!("workspace root is not a directory: {}", root.display());
         }
 
-        let workspace = Self { root };
+        let workspace = Self {
+            root,
+            nit_dir_override: None,
+        };
         let nit_dir = workspace.nit_dir();
+        reject_symlink(&nit_dir)?;
         let already_existed = nit_dir.is_dir();
         if nit_dir.exists() && !already_existed {
             bail!(
@@ -84,14 +103,13 @@ impl Workspace {
                 .with_context(|| format!("could not create {}", nit_dir.display()))?;
         }
 
-        create_storage_file(
-            &workspace.notes_path(),
-            &render_notes(&Notes::default(), None, None, ACTIVE_TITLE),
-        )?;
-        create_storage_file(
-            &workspace.archive_path(),
-            &render_notes(&Notes::default(), None, None, ARCHIVE_TITLE),
-        )?;
+        if workspace.legacy_notes_path().is_file() || workspace.legacy_archive_path().is_file() {
+            return Ok(InitResult {
+                workspace,
+                already_existed: true,
+            });
+        }
+        create_layout(&workspace.nit_dir())?;
         create_storage_file(&workspace.next_ids_path(), &IdSequences::default().render())?;
 
         Ok(InitResult {
@@ -100,35 +118,115 @@ impl Workspace {
         })
     }
 
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub(crate) fn nit_dir(&self) -> PathBuf {
-        self.root.join(NIT_DIRECTORY)
+    pub fn nit_dir(&self) -> PathBuf {
+        self.nit_dir_override
+            .clone()
+            .unwrap_or_else(|| self.root.join(NIT_DIRECTORY))
     }
 
-    pub(crate) fn notes_path(&self) -> PathBuf {
-        self.nit_dir().join(NOTES_FILE)
+    pub(crate) fn from_root_for_layout(root: &Path, nit_dir: PathBuf) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            nit_dir_override: Some(nit_dir),
+        }
     }
 
-    pub(crate) fn archive_path(&self) -> PathBuf {
+    pub fn archive_path(&self) -> PathBuf {
         self.nit_dir().join(ARCHIVE_FILE)
     }
 
-    pub(crate) fn next_ids_path(&self) -> PathBuf {
+    pub fn legacy_notes_path(&self) -> PathBuf {
+        self.nit_dir().join(NOTES_FILE)
+    }
+
+    pub fn legacy_archive_path(&self) -> PathBuf {
+        self.nit_dir().join(ARCHIVE_FILE)
+    }
+
+    pub fn ideas_path(&self, archived: bool) -> PathBuf {
+        self.collection_root(archived).join(IDEAS_FILE)
+    }
+
+    pub fn items_path(&self, archived: bool) -> PathBuf {
+        self.collection_root(archived).join(ITEMS_FILE)
+    }
+
+    pub fn todos_path(&self, archived: bool) -> PathBuf {
+        self.collection_root(archived).join(TODOS_FILE)
+    }
+
+    pub fn notes_dir(&self, archived: bool) -> PathBuf {
+        self.collection_root(archived).join(NOTES_FILE)
+    }
+
+    fn collection_root(&self, archived: bool) -> PathBuf {
+        if archived {
+            self.archive_path()
+        } else {
+            self.nit_dir()
+        }
+    }
+
+    pub fn next_ids_path(&self) -> PathBuf {
         self.nit_dir().join(NEXT_IDS_FILE)
     }
 }
 
-pub(crate) fn ensure_private(root: &Path) -> Result<()> {
+fn create_layout(nit_dir: &Path) -> Result<()> {
+    let archive = nit_dir.join(ARCHIVE_FILE);
+    fs::create_dir_all(nit_dir.join(NOTES_FILE))?;
+    fs::create_dir_all(archive.join(NOTES_FILE))?;
+    for (path, kind, title) in [
+        (
+            nit_dir.join(IDEAS_FILE),
+            crate::model::Kind::Idea,
+            ACTIVE_TITLE,
+        ),
+        (
+            nit_dir.join(ITEMS_FILE),
+            crate::model::Kind::Item,
+            ACTIVE_TITLE,
+        ),
+        (
+            nit_dir.join(TODOS_FILE),
+            crate::model::Kind::Todo,
+            ACTIVE_TITLE,
+        ),
+        (
+            archive.join(IDEAS_FILE),
+            crate::model::Kind::Idea,
+            ARCHIVE_TITLE,
+        ),
+        (
+            archive.join(ITEMS_FILE),
+            crate::model::Kind::Item,
+            ARCHIVE_TITLE,
+        ),
+        (
+            archive.join(TODOS_FILE),
+            crate::model::Kind::Todo,
+            ARCHIVE_TITLE,
+        ),
+    ] {
+        create_storage_file(
+            &path,
+            &render_notes(&Notes::default(), Some(kind), None, title),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn ensure_private(root: &Path) -> Result<()> {
     let gitignore = root.join(".gitignore");
-    let existing = match fs::read_to_string(&gitignore) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not read {}", gitignore.display()))
-        }
+    ensure_regular_or_missing(&gitignore)?;
+    let existing = if gitignore.exists() {
+        read_text_limited(&gitignore, MAX_GITIGNORE_BYTES)?
+    } else {
+        String::new()
     };
     if explicitly_ignores_nit(&existing) {
         return Ok(());
@@ -146,16 +244,20 @@ pub(crate) fn ensure_private(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn appears_ignored(root: &Path) -> Result<bool> {
+pub fn appears_ignored(root: &Path) -> Result<bool> {
     let path = root.join(".gitignore");
-    match fs::read_to_string(&path) {
-        Ok(value) => Ok(explicitly_ignores_nit(&value)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("could not read {}", path.display())),
+    ensure_regular_or_missing(&path)?;
+    if path.exists() {
+        Ok(explicitly_ignores_nit(&read_text_limited(
+            &path,
+            MAX_GITIGNORE_BYTES,
+        )?))
+    } else {
+        Ok(false)
     }
 }
 
-pub(crate) fn migrate(path: &Path) -> Result<Workspace> {
+pub fn migrate(path: &Path) -> Result<Workspace> {
     let root = path
         .canonicalize()
         .with_context(|| format!("could not resolve {}", path.display()))?;
@@ -196,14 +298,8 @@ pub(crate) fn migrate(path: &Path) -> Result<Workspace> {
         Notes::default()
     };
 
-    let staging = root.join(format!(".nit.migrate.{}.tmp", std::process::id()));
-    if staging.exists() {
-        bail!(
-            "cannot migrate: temporary path already exists: {}",
-            staging.display()
-        );
-    }
-    fs::create_dir(&staging).with_context(|| format!("could not create {}", staging.display()))?;
+    let staging_guard = temporary_directory(&root, ".nit.migrate.")?;
+    let staging = staging_guard.path().to_path_buf();
 
     let staged_notes = staging.join(NOTES_FILE);
     let staged_archive = staging.join(ARCHIVE_FILE);
@@ -223,15 +319,13 @@ pub(crate) fn migrate(path: &Path) -> Result<Workspace> {
         }
         let mut sequences = IdSequences::default();
         sequences.reconcile_for_timeless_migration([&expected_notes, &expected_archive])?;
-        fs::write(staging.join(NEXT_IDS_FILE), sequences.render())
+        atomic_write(&staging.join(NEXT_IDS_FILE), sequences.render())
             .with_context(|| "could not create migrated ID sequences")?;
         Ok(())
     })();
-    if let Err(error) = staged_result {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error);
-    }
+    staged_result?;
 
+    let staging = staging_guard.keep();
     fs::rename(&staging, &nit_dir)
         .with_context(|| format!("could not install workspace at {}", nit_dir.display()))?;
     if has_notes {
@@ -251,19 +345,25 @@ pub(crate) fn migrate(path: &Path) -> Result<Workspace> {
         })?;
     }
 
-    Ok(Workspace { root })
+    Ok(Workspace {
+        root,
+        nit_dir_override: None,
+    })
 }
 
 fn create_storage_file(path: &Path, contents: &str) -> Result<()> {
+    ensure_regular_or_missing(path)?;
     if path.exists() {
         if path.is_file() {
             return Ok(());
         }
         bail!("storage path is not a file: {}", path.display());
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(path)
         .with_context(|| format!("could not create {}", path.display()))?;
     file.write_all(contents.as_bytes())
@@ -280,7 +380,7 @@ fn copy_or_create(source: Option<&Path>, destination: &Path, title: &str) -> Res
             )
         })?;
     } else {
-        fs::write(
+        atomic_write(
             destination,
             render_notes(&Notes::default(), None, None, title),
         )
@@ -376,7 +476,7 @@ mod tests {
         let root = temporary_directory("paths");
         let workspace = Workspace::init(&root).unwrap().workspace;
         assert_eq!(workspace.nit_dir(), root.join(".nit"));
-        assert_eq!(workspace.notes_path(), root.join(".nit/notes"));
+        assert_eq!(workspace.notes_dir(false), root.join(".nit/notes"));
         assert_eq!(workspace.archive_path(), root.join(".nit/archive"));
         assert_eq!(workspace.next_ids_path(), root.join(".nit/next-ids"));
         fs::remove_dir_all(root).unwrap();
@@ -387,14 +487,15 @@ mod tests {
         let root = temporary_directory("init");
         let first = Workspace::init(&root).unwrap();
         assert!(!first.already_existed);
-        fs::write(first.workspace.notes_path(), "custom").unwrap();
+        fs::write(first.workspace.ideas_path(false), "custom").unwrap();
         let second = Workspace::init(&root).unwrap();
         assert!(second.already_existed);
         assert_eq!(
-            fs::read_to_string(second.workspace.notes_path()).unwrap(),
+            fs::read_to_string(second.workspace.ideas_path(false)).unwrap(),
             "custom"
         );
-        assert!(second.workspace.archive_path().is_file());
+        assert!(second.workspace.notes_dir(false).is_dir());
+        assert!(second.workspace.archive_path().is_dir());
         assert!(second.workspace.next_ids_path().is_file());
         fs::remove_dir_all(root).unwrap();
     }
@@ -429,7 +530,10 @@ mod tests {
         fs::write(root.join(".notes"), active).unwrap();
         fs::write(root.join(".notes.archive"), archived).unwrap();
         let workspace = migrate(&root).unwrap();
-        assert_eq!(fs::read_to_string(workspace.notes_path()).unwrap(), active);
+        assert_eq!(
+            fs::read_to_string(workspace.legacy_notes_path()).unwrap(),
+            active
+        );
         assert_eq!(
             fs::read_to_string(workspace.archive_path()).unwrap(),
             archived
@@ -456,10 +560,10 @@ mod tests {
             )
             .unwrap();
             let workspace = migrate(&root).unwrap();
-            assert!(workspace.notes_path().is_file());
+            assert!(workspace.legacy_notes_path().is_file());
             assert!(workspace.archive_path().is_file());
             let migrated_path = if legacy_name == LEGACY_NOTES_FILE {
-                workspace.notes_path()
+                workspace.legacy_notes_path()
             } else {
                 workspace.archive_path()
             };

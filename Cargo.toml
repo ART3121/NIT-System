@@ -1,21 +1,55 @@
 [package]
 name = "nit-system"
-version = "0.2.0"
+version.workspace = true
+edition.workspace = true
+description = "A fast local-first terminal notes and task manager"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+license.workspace = true
+rust-version.workspace = true
+
+[workspace]
+members = [
+    ".",
+    "crates/nit-ai",
+    "crates/nit-cli",
+    "crates/nit-core",
+    "crates/nit-editor",
+    "crates/nit-tui",
+    "crates/nitcat",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
 edition = "2021"
-description = "A fast local terminal note system"
+rust-version = "1.88"
+license = "MIT"
 repository = "https://github.com/ART3121/NIT-System"
 homepage = "https://github.com/ART3121/NIT-System"
-readme = "README.md"
-license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+crossterm = "0.29"
+fs2 = "0.4"
+pulldown-cmark = "0.13"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.20"
+unicode-width = "0.2"
 
 [[bin]]
 name = "nit"
 path = "src/main.rs"
 
+[[bin]]
+name = "nitcat"
+path = "src/bin/nitcat.rs"
+doc = false
+
 [dependencies]
-anyhow = "1.0"
-crossterm = "0.28"
-ratatui = "0.29"
-unicode-width = "0.2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+anyhow.workspace = true
+nit-cli = { path = "crates/nit-cli" }
+nitcat = { path = "crates/nitcat" }

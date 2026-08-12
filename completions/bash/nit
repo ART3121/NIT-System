@@ -1,0 +1,51 @@
+_nit() {
+    local current command candidates
+    current="${COMP_WORDS[COMP_CWORD]}"
+    command="${COMP_WORDS[1]}"
+
+    case "$command" in
+        -init)
+            COMPREPLY=($(compgen -W "--private --tracked" -- "$current"))
+            return
+            ;;
+        -ls)
+            COMPREPLY=($(compgen -W "-si -mi -li -st -mt -lt -n -x --archived" -- "$current"))
+            return
+            ;;
+        -search)
+            if [[ "$current" == -* ]]; then
+                COMPREPLY=($(compgen -W "-si -mi -li -st -mt -lt -n -x --archived --all" -- "$current"))
+                return
+            fi
+            ;;
+        -show|-edit)
+            if (( COMP_CWORD == 2 )); then
+                COMPREPLY=($(compgen -W "$(nit -completion-ids 2>/dev/null)" -- "$current"))
+                return
+            fi
+            if [[ "$current" == -* ]]; then
+                COMPREPLY=($(compgen -W "--archived" -- "$current"))
+                return
+            fi
+            ;;
+        -archive|-ai-roadmap)
+            COMPREPLY=($(compgen -W "$(nit -completion-ids 2>/dev/null)" -- "$current"))
+            return
+            ;;
+        -import)
+            COMPREPLY=($(compgen -f -- "$current"))
+            return
+            ;;
+        -completions)
+            COMPREPLY=($(compgen -W "bash zsh fish" -- "$current"))
+            return
+            ;;
+    esac
+
+    if (( COMP_CWORD == 1 )) || [[ "$current" == -* ]]; then
+        candidates="-init -migrate -assign-ids -migrate-timeless -ai-roadmap -root -path -status -search -ls -show -edit -archive -import -completions -tui -help -version -si -mi -li -st -mt -lt -n -x"
+        COMPREPLY=($(compgen -W "$candidates" -- "$current"))
+    fi
+}
+
+complete -F _nit nit

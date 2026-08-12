@@ -1,11 +1,14 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap, RoadmapStep, HORIZONS};
+use crate::{
+    fsutil::{atomic_write, read_text_limited, MAX_STORAGE_BYTES},
+    model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap, RoadmapStep, HORIZONS},
+};
 
-pub(crate) const ACTIVE_TITLE: &str = "NIT System";
-pub(crate) const ARCHIVE_TITLE: &str = "NIT System — Archived";
+pub const ACTIVE_TITLE: &str = "NIT System";
+pub const ARCHIVE_TITLE: &str = "NIT System — Archived";
 
 #[derive(Clone, Copy)]
 enum Scope {
@@ -17,8 +20,8 @@ pub(crate) fn load(path: &Path) -> Result<Notes> {
     if !path.exists() {
         return Ok(Notes::default());
     }
-    let source =
-        fs::read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
+    let source = read_text_limited(path, MAX_STORAGE_BYTES)
+        .with_context(|| format!("could not read {}", path.display()))?;
     if source.trim().is_empty() {
         return Ok(Notes::default());
     }
@@ -32,22 +35,25 @@ fn parse_notes(source: &str) -> Result<Notes> {
     let mut current: Option<Entry> = None;
     let mut current_step: Option<RoadmapStep> = None;
     for line in source.lines() {
-        if let Some(value) = line.trim_start().strip_prefix("- ") {
+        if let Some(value) = line.strip_prefix("- ") {
             push_entry(&mut notes, &mut current, &mut current_step)?;
-            if let (Some(scope), Some(kind)) = (scope, kind) {
-                let horizon = section_horizon(scope, kind)?;
-                let (id, value) = entry_id_and_text(value);
-                if let Some(id) = id {
-                    validate_id_for_entry(id, kind, horizon)?;
-                }
-                current = Some(Entry {
-                    id,
-                    kind,
-                    horizon,
-                    text: value.to_owned(),
-                    roadmap: None,
-                });
+            let (entry_scope, entry_kind) = match (scope, kind) {
+                (Some(scope), Some(kind)) => (scope, kind),
+                _ => bail!("entry appears outside a recognized NIT section: {value}"),
+            };
+            let horizon = section_horizon(entry_scope, entry_kind)?;
+            let (id, value) = entry_id_and_text(value);
+            if let Some(id) = id {
+                validate_id_for_entry(id, entry_kind, horizon)?;
             }
+            current = Some(Entry {
+                id,
+                kind: entry_kind,
+                horizon,
+                text: value.to_owned(),
+                body: String::new(),
+                roadmap: None,
+            });
             continue;
         }
         if let Some(value) = heading_scope(line) {
@@ -59,6 +65,17 @@ fn parse_notes(source: &str) -> Result<Notes> {
         if let Some(value) = heading_kind(line) {
             push_entry(&mut notes, &mut current, &mut current_step)?;
             kind = Some(value);
+            continue;
+        }
+        if heading_text(line, 2).is_some() {
+            push_entry(&mut notes, &mut current, &mut current_step)?;
+            scope = None;
+            kind = None;
+            continue;
+        }
+        if heading_text(line, 3).is_some() {
+            push_entry(&mut notes, &mut current, &mut current_step)?;
+            kind = None;
             continue;
         }
         if let Some(entry) = current.as_mut() {
@@ -97,8 +114,15 @@ fn parse_notes(source: &str) -> Result<Notes> {
                 bail!("invalid Roadmap line: {}", line.trim());
             }
             if line.starts_with("  ") && !line.trim().is_empty() {
-                entry.text.push('\n');
-                entry.text.push_str(line.trim_start());
+                if entry.kind == Kind::Note {
+                    if !entry.body.is_empty() {
+                        entry.body.push('\n');
+                    }
+                    entry.body.push_str(line.trim_start());
+                } else {
+                    entry.text.push('\n');
+                    entry.text.push_str(line.trim_start());
+                }
             }
         }
     }
@@ -196,7 +220,7 @@ fn push_entry(
 }
 
 fn heading_scope(line: &str) -> Option<Scope> {
-    let line = heading_text(line)?.to_lowercase();
+    let line = heading_text(line, 2)?.to_lowercase();
     match line.as_str() {
         "timeless" | "atemporal" => Some(Scope::Timeless),
         "short term" | "curto prazo" => Some(Scope::Horizon(Horizon::Short)),
@@ -207,7 +231,7 @@ fn heading_scope(line: &str) -> Option<Scope> {
 }
 
 fn heading_kind(line: &str) -> Option<Kind> {
-    let line = heading_text(line)?.to_lowercase();
+    let line = heading_text(line, 3)?.to_lowercase();
     match line.as_str() {
         "ideas" => Some(Kind::Idea),
         "notes" => Some(Kind::Note),
@@ -217,13 +241,12 @@ fn heading_kind(line: &str) -> Option<Kind> {
     }
 }
 
-fn heading_text(line: &str) -> Option<&str> {
-    let line = line.trim_start();
+fn heading_text(line: &str, expected_level: usize) -> Option<&str> {
     let marker_length = line
         .chars()
         .take_while(|character| *character == '#')
         .count();
-    if marker_length == 0 {
+    if marker_length != expected_level {
         return None;
     }
     let remainder = &line[marker_length..];
@@ -236,21 +259,10 @@ fn heading_text(line: &str) -> Option<&str> {
 
 pub(crate) fn save(path: &Path, notes: &Notes, title: &str) -> Result<()> {
     let body = render_notes(notes, None, None, title);
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("notes path has no parent"))?;
-    let temporary = parent.join(format!(
-        "{}.tmp",
-        path.file_name().unwrap().to_string_lossy()
-    ));
-    fs::write(&temporary, body)
-        .with_context(|| format!("could not write {}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .with_context(|| format!("could not replace {}", path.display()))?;
-    Ok(())
+    atomic_write(path, body)
 }
 
-pub(crate) fn render_notes(
+pub fn render_notes(
     notes: &Notes,
     kind_filter: Option<Kind>,
     horizon_filter: Option<Horizon>,
@@ -315,7 +327,12 @@ fn write_entries(output: &mut String, notes: &Notes, kind: Kind, horizon: Option
     }
     output.push_str(&format!("\n### {}\n", kind.heading()));
     for entry in entries {
-        let mut lines = entry.text.lines();
+        let combined = if entry.kind == Kind::Note && !entry.body.is_empty() {
+            format!("{}\n{}", entry.text, entry.body)
+        } else {
+            entry.text.clone()
+        };
+        let mut lines = combined.lines();
         if let Some(first) = lines.next() {
             output.push_str("- ");
             if let Some(id) = entry.id {
@@ -364,6 +381,7 @@ mod tests {
                     kind: Kind::Item,
                     horizon: None,
                     text: "reference".into(),
+                    body: String::new(),
                     roadmap: None,
                 },
                 Entry {
@@ -371,6 +389,7 @@ mod tests {
                     kind: Kind::Idea,
                     horizon: Some(Horizon::Long),
                     text: "one\ntwo".into(),
+                    body: String::new(),
                     roadmap: None,
                 },
             ],
@@ -412,6 +431,40 @@ mod tests {
         assert!(heading_scope("## Short Term Planning").is_none());
         assert_eq!(heading_kind("### Notes from the meeting"), None);
         assert!(heading_scope("##Short Term").is_none());
+        assert!(heading_scope("  ## Short Term").is_none());
+        assert!(heading_scope("### Short Term").is_none());
+        assert_eq!(heading_kind("  ### Notes"), None);
+        assert_eq!(heading_kind("## Notes"), None);
+    }
+
+    #[test]
+    fn nested_note_bullets_remain_in_the_note_body() {
+        let notes = parse_notes(concat!(
+            "# NIT System\n\n## Timeless\n\n### Notes\n",
+            "- Imported title\n",
+            "  Introductory paragraph.\n",
+            "  - first nested bullet\n",
+            "  - second nested bullet\n",
+        ))
+        .unwrap();
+        assert_eq!(notes.entries.len(), 1);
+        assert_eq!(notes.entries[0].text, "Imported title");
+        assert_eq!(
+            notes.entries[0].body,
+            "Introductory paragraph.\n- first nested bullet\n- second nested bullet"
+        );
+    }
+
+    #[test]
+    fn unknown_sections_cannot_inherit_a_previous_classification() {
+        let source = concat!(
+            "# NIT System\n\n## Timeless\n\n### Notes\n",
+            "- valid note\n\n### Unknown\n- must not become a note\n",
+        );
+        let error = parse_notes(source).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside a recognized NIT section"));
     }
 
     #[test]
@@ -422,6 +475,7 @@ mod tests {
                 kind: Kind::Todo,
                 horizon: Some(Horizon::Short),
                 text: "Fix parser".into(),
+                body: String::new(),
                 roadmap: None,
             }],
         };
@@ -438,6 +492,7 @@ mod tests {
                 kind: Kind::Idea,
                 horizon: Some(Horizon::Long),
                 text: "Learn Kubernetes".into(),
+                body: String::new(),
                 roadmap: Some(Roadmap {
                     steps: vec![
                         RoadmapStep {
