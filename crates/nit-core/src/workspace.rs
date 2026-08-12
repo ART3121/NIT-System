@@ -428,7 +428,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
-        path
+        path.canonicalize().unwrap()
     }
 
     #[test]

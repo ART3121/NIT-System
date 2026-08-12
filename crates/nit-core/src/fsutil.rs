@@ -197,12 +197,26 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        if fs::hard_link(source, destination).is_err() {
-            fs::copy(source, destination)?;
-        }
+        snapshot_file(source, destination)?;
     } else {
         bail!("unsupported workspace file type: {}", source.display());
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn snapshot_file(source: &Path, destination: &Path) -> Result<()> {
+    if fs::hard_link(source, destination).is_err() {
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn snapshot_file(source: &Path, destination: &Path) -> Result<()> {
+    // A real copy preserves rollback semantics without retaining the original
+    // file identity, which would block replacement on Windows.
+    fs::copy(source, destination)?;
     Ok(())
 }
 
