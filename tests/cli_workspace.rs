@@ -12,7 +12,7 @@ fn temporary_directory(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("nit-cli-{name}-{}-{number}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
-    path
+    path.canonicalize().unwrap()
 }
 
 fn nit(directory: &Path, arguments: &[&str]) -> Output {

@@ -222,7 +222,12 @@ fn snapshot_file(source: &Path, destination: &Path) -> Result<()> {
 
 fn sync_tree(path: &Path) -> Result<()> {
     if path.is_file() {
-        return File::open(path)?.sync_all().map_err(Into::into);
+        return OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .and_then(|file| file.sync_all())
+            .with_context(|| format!("could not sync {}", path.display()));
     }
     for item in fs::read_dir(path)? {
         sync_tree(&item?.path())?;
@@ -272,10 +277,14 @@ pub(crate) fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()
         .as_file()
         .sync_all()
         .with_context(|| format!("could not sync staged file for {}", path.display()))?;
-    temporary
+    let temporary = temporary
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("could not replace {}", path.display()))?;
+    temporary
+        .sync_all()
+        .with_context(|| format!("could not sync {}", path.display()))?;
+    drop(temporary);
     sync_directory(parent)?;
     Ok(())
 }
