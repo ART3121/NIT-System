@@ -729,6 +729,7 @@ dependencies = [
  "anyhow",
  "interprocess",
  "nit-core",
+ "nit-drive",
  "secrecy",
  "serde",
  "serde_json",

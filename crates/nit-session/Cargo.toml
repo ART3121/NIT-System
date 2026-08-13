@@ -15,6 +15,7 @@ path = "src/bin/nit-session-agent.rs"
 anyhow.workspace = true
 interprocess.workspace = true
 nit-core = { path = "../nit-core" }
+nit-drive = { path = "../nit-drive" }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

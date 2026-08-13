@@ -7,6 +7,26 @@ use serde::{Deserialize, Serialize};
 
 mod platform;
 
+/// Captures the current physical/mount presence of a Vault path.
+///
+/// A detector is tied to one connection. Once it reports false it must be
+/// discarded; reinsertion requires a new detector after password unlock.
+pub struct RemovalDetector {
+    token: platform::PresenceToken,
+}
+
+impl RemovalDetector {
+    pub fn capture(path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            token: platform::PresenceToken::capture(path)?,
+        })
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.token.is_present()
+    }
+}
+
 /// Physical disk information used for explicit provisioning decisions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovableDevice {

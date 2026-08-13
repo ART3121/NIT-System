@@ -12,6 +12,57 @@ const SYS_BLOCK: &str = "/sys/class/block";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 const MAX_DEVICES: usize = 256;
 
+pub(crate) struct PresenceToken {
+    canonical_path: PathBuf,
+    mount_id: String,
+    device_number: String,
+    mount_point: PathBuf,
+}
+
+impl PresenceToken {
+    pub(crate) fn capture(path: &Path) -> Result<Self> {
+        Self::capture_from(path, Path::new(MOUNTINFO))
+    }
+
+    fn capture_from(path: &Path, mountinfo: &Path) -> Result<Self> {
+        let canonical_path = path
+            .canonicalize()
+            .with_context(|| format!("Vault path is unavailable: {}", path.display()))?;
+        let mounts = parse_presence_mounts(&fs::read_to_string(mountinfo)?)?;
+        let mount = mounts
+            .into_iter()
+            .filter(|mount| canonical_path.starts_with(&mount.mount_point))
+            .max_by_key(|mount| mount.mount_point.as_os_str().len())
+            .ok_or_else(|| anyhow::anyhow!("could not identify the Vault mount"))?;
+        Ok(Self {
+            canonical_path,
+            mount_id: mount.mount_id,
+            device_number: mount.device_number,
+            mount_point: mount.mount_point,
+        })
+    }
+
+    pub(crate) fn is_present(&self) -> bool {
+        self.is_present_from(Path::new(MOUNTINFO))
+    }
+
+    fn is_present_from(&self, mountinfo: &Path) -> bool {
+        if self.canonical_path.canonicalize().ok().as_ref() != Some(&self.canonical_path) {
+            return false;
+        }
+        fs::read_to_string(mountinfo)
+            .ok()
+            .and_then(|source| parse_presence_mounts(&source).ok())
+            .is_some_and(|mounts| {
+                mounts.into_iter().any(|mount| {
+                    mount.mount_id == self.mount_id
+                        && mount.device_number == self.device_number
+                        && mount.mount_point == self.mount_point
+                })
+            })
+    }
+}
+
 pub(crate) fn discover_devices() -> Result<Vec<RemovableDevice>> {
     discover_from(Path::new(SYS_BLOCK), Path::new(MOUNTINFO))
 }
@@ -130,6 +181,12 @@ struct MountRecord {
     mount_point: PathBuf,
 }
 
+struct PresenceMount {
+    mount_id: String,
+    device_number: String,
+    mount_point: PathBuf,
+}
+
 fn parse_mountinfo(source: &str) -> Result<Vec<MountRecord>> {
     let mut mounts = Vec::new();
     for line in source.lines() {
@@ -143,6 +200,25 @@ fn parse_mountinfo(source: &str) -> Result<Vec<MountRecord>> {
         }
         mounts.push(MountRecord {
             device_number: device_number.to_owned(),
+            mount_point: PathBuf::from(decode_mount_field(fields[4])?),
+        });
+    }
+    Ok(mounts)
+}
+
+fn parse_presence_mounts(source: &str) -> Result<Vec<PresenceMount>> {
+    let mut mounts = Vec::new();
+    for line in source.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 || !fields.contains(&"-") || !valid_device_number(fields[2]) {
+            bail!("invalid Linux mountinfo record");
+        }
+        if !fields[0].bytes().all(|byte| byte.is_ascii_digit()) {
+            bail!("invalid Linux mount ID");
+        }
+        mounts.push(PresenceMount {
+            mount_id: fields[0].to_owned(),
+            device_number: fields[2].to_owned(),
             mount_point: PathBuf::from(decode_mount_field(fields[4])?),
         });
     }
@@ -289,5 +365,33 @@ mod tests {
     fn rejects_malformed_mount_information() {
         assert!(parse_mountinfo("not mountinfo").is_err());
         assert!(decode_mount_field("/bad\\xx").is_err());
+    }
+
+    #[test]
+    fn presence_token_never_survives_a_mount_generation_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("media/NIT/vault");
+        fs::create_dir_all(&vault).unwrap();
+        let mountinfo = temp.path().join("mountinfo");
+        fs::write(
+            &mountinfo,
+            format!(
+                "41 25 8:17 / {} rw - exfat /dev/sdb1 rw\n",
+                temp.path().join("media/NIT").display()
+            ),
+        )
+        .unwrap();
+        let token = PresenceToken::capture_from(&vault, &mountinfo).unwrap();
+        assert!(token.is_present_from(&mountinfo));
+
+        fs::write(
+            &mountinfo,
+            format!(
+                "42 25 8:17 / {} rw - exfat /dev/sdb1 rw\n",
+                temp.path().join("media/NIT").display()
+            ),
+        )
+        .unwrap();
+        assert!(!token.is_present_from(&mountinfo));
     }
 }

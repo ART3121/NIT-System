@@ -8,7 +8,12 @@
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -17,6 +22,7 @@ use nit_core::{
     vault::Vault, Entry, EntryId, Horizon, Kind, LocatedEntry, Nit, NitApi, Notes, Roadmap,
     Status as NitStatus, VaultWorkspaceId, View,
 };
+use nit_drive::RemovalDetector;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -159,11 +165,81 @@ struct Response {
 }
 
 struct UnlockedSession {
-    nit: Nit,
+    nit: Arc<Mutex<Option<Nit>>>,
+    unavailable: Arc<AtomicBool>,
+    stop_monitor: Arc<AtomicBool>,
+    monitor: Option<thread::JoinHandle<()>>,
     vault_path: PathBuf,
     vault_id: String,
     workspace_id: String,
     workspace_name: String,
+}
+
+impl UnlockedSession {
+    fn new(
+        nit: Nit,
+        vault_path: PathBuf,
+        vault_id: String,
+        workspace_id: String,
+        workspace_name: String,
+    ) -> Result<Self> {
+        let detector = RemovalDetector::capture(&vault_path)?;
+        let nit = Arc::new(Mutex::new(Some(nit)));
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let stop_monitor = Arc::new(AtomicBool::new(false));
+        let monitored_nit = Arc::clone(&nit);
+        let monitored_unavailable = Arc::clone(&unavailable);
+        let monitored_stop = Arc::clone(&stop_monitor);
+        let monitor = thread::Builder::new()
+            .name("nit-drive-removal-monitor".into())
+            .spawn(move || {
+                while !monitored_stop.load(Ordering::Acquire) {
+                    if !detector.is_present() {
+                        if let Ok(mut nit) = monitored_nit.lock() {
+                            *nit = None;
+                        }
+                        monitored_unavailable.store(true, Ordering::Release);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            })
+            .context("could not start NIT Drive removal monitor")?;
+        Ok(Self {
+            nit,
+            unavailable,
+            stop_monitor,
+            monitor: Some(monitor),
+            vault_path,
+            vault_id,
+            workspace_id,
+            workspace_name,
+        })
+    }
+
+    fn with_nit<T>(&self, operation: impl FnOnce(&Nit) -> Result<T>) -> Result<T> {
+        let nit = self
+            .nit
+            .lock()
+            .map_err(|_| anyhow!("NIT Session state is unavailable"))?;
+        operation(
+            nit.as_ref().ok_or_else(|| {
+                anyhow!("NIT Drive is unavailable; reconnect and unlock it again")
+            })?,
+        )
+    }
+}
+
+impl Drop for UnlockedSession {
+    fn drop(&mut self) {
+        self.stop_monitor.store(true, Ordering::Release);
+        if let Some(monitor) = self.monitor.take() {
+            let _ = monitor.join();
+        }
+        if let Ok(mut nit) = self.nit.lock() {
+            *nit = None;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -174,11 +250,10 @@ struct AgentState {
 
 impl AgentState {
     fn status(&mut self) -> SessionStatus {
-        if self
-            .unlocked
-            .as_ref()
-            .is_some_and(|session| !vault_still_available(&session.vault_path))
-        {
+        if self.unlocked.as_ref().is_some_and(|session| {
+            session.unavailable.load(Ordering::Acquire)
+                || !vault_still_available(&session.vault_path)
+        }) {
             self.unlocked = None;
             self.unavailable = true;
         }
@@ -207,13 +282,13 @@ impl AgentState {
         let info = nit
             .vault_workspace()?
             .ok_or_else(|| anyhow!("Vault workspace is unavailable"))?;
-        self.unlocked = Some(UnlockedSession {
+        self.unlocked = Some(UnlockedSession::new(
             nit,
-            vault_path: vault.path().to_path_buf(),
+            vault.path().to_path_buf(),
             vault_id,
-            workspace_id: info.id.to_string(),
-            workspace_name: info.name,
-        });
+            info.id.to_string(),
+            info.name,
+        )?);
         self.unavailable = false;
         Ok(self.status())
     }
@@ -224,13 +299,13 @@ impl AgentState {
         SessionStatus::Locked
     }
 
-    fn nit(&mut self) -> Result<&Nit> {
+    fn with_nit<T>(&mut self, operation: impl FnOnce(&Nit) -> Result<T>) -> Result<T> {
         match self.status() {
-            SessionStatus::Unlocked { .. } => Ok(&self
+            SessionStatus::Unlocked { .. } => self
                 .unlocked
                 .as_ref()
                 .expect("unlocked status requires a session")
-                .nit),
+                .with_nit(operation),
             SessionStatus::Unavailable => {
                 bail!("NIT Drive is unavailable; reconnect and unlock it again")
             }
@@ -589,22 +664,17 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
                 .map(Reply::Session)
         }
         Request::Lock { .. } | Request::Shutdown { .. } => Ok(Reply::Session(state.lock())),
-        Request::Load { view, .. } => state
-            .nit()
-            .and_then(|nit| nit.load(*view))
-            .map(Reply::Notes),
+        Request::Load { view, .. } => state.with_nit(|nit| nit.load(*view)).map(Reply::Notes),
         Request::Save {
             view,
             expected,
             notes,
             ..
         } => state
-            .nit()
-            .and_then(|nit| nit.save_if_unchanged(*view, expected, notes))
+            .with_nit(|nit| nit.save_if_unchanged(*view, expected, notes))
             .map(|()| Reply::Unit),
         Request::All { .. } => state
-            .nit()
-            .and_then(Nit::all)
+            .with_nit(Nit::all)
             .map(|(active, archived)| Reply::All(active, archived)),
         Request::SaveAll {
             expected_active,
@@ -613,15 +683,13 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
             archived,
             ..
         } => state
-            .nit()
-            .and_then(|nit| {
+            .with_nit(|nit| {
                 nit.save_all_if_unchanged(expected_active, expected_archived, active, archived)
             })
             .map(|()| Reply::Unit),
-        Request::NitStatus { .. } => state.nit().and_then(Nit::status).map(Reply::NitStatus),
+        Request::NitStatus { .. } => state.with_nit(Nit::status).map(Reply::NitStatus),
         Request::FindById { id, .. } => state
-            .nit()
-            .and_then(|nit| nit.find_by_id(*id))
+            .with_nit(|nit| nit.find_by_id(*id))
             .map(Reply::LocatedEntry),
         Request::Search {
             query,
@@ -629,8 +697,7 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
             classification,
             ..
         } => state
-            .nit()
-            .and_then(|nit| nit.search(query, views, *classification))
+            .with_nit(|nit| nit.search(query, views, *classification))
             .map(Reply::Matches),
         Request::Create {
             kind,
@@ -638,24 +705,19 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
             text,
             ..
         } => state
-            .nit()
-            .and_then(|nit| nit.create(*kind, *horizon, std::mem::take(text)))
+            .with_nit(|nit| nit.create(*kind, *horizon, std::mem::take(text)))
             .map(Reply::EntryId),
         Request::Archive { query, .. } => state
-            .nit()
-            .and_then(|nit| nit.archive(query))
+            .with_nit(|nit| nit.archive(query))
             .map(|()| Reply::Unit),
-        Request::Import { source, .. } => state
-            .nit()
-            .and_then(|nit| nit.import(source))
-            .map(Reply::Count),
+        Request::Import { source, .. } => {
+            state.with_nit(|nit| nit.import(source)).map(Reply::Count)
+        }
         Request::RoadmapTarget { id, .. } => state
-            .nit()
-            .and_then(|nit| nit.roadmap_target(*id))
+            .with_nit(|nit| nit.roadmap_target(*id))
             .map(Reply::Entry),
         Request::AttachRoadmap { entry, roadmap, .. } => state
-            .nit()
-            .and_then(|nit| nit.attach_roadmap(entry, roadmap.clone()))
+            .with_nit(|nit| nit.attach_roadmap(entry, roadmap.clone()))
             .map(|()| Reply::Unit),
     };
     let (reply, error) = match result {
@@ -878,5 +940,36 @@ mod tests {
         ));
         client.shutdown_agent().unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn removal_monitor_revokes_the_key_slot_without_a_client_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().join("vault");
+        let vault = Arc::new(
+            Vault::create(&vault_path, &SecretString::from("password".to_owned())).unwrap(),
+        );
+        let workspace = Nit::create_vault_workspace(&vault, "Portable").unwrap();
+        drop(vault);
+        let mut state = AgentState::default();
+        state
+            .unlock(
+                &vault_path,
+                &workspace.id.to_string(),
+                SecretString::from("password".to_owned()),
+            )
+            .unwrap();
+        let key_slot = Arc::clone(&state.unlocked.as_ref().unwrap().nit);
+
+        let detached = temp.path().join("detached");
+        std::fs::rename(&vault_path, detached).unwrap();
+        for _ in 0..50 {
+            if key_slot.lock().unwrap().is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(key_slot.lock().unwrap().is_none());
+        assert_eq!(state.status(), SessionStatus::Unavailable);
     }
 }

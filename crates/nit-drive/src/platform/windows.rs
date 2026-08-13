@@ -5,6 +5,24 @@ use serde::Deserialize;
 
 use crate::RemovableDevice;
 
+pub(crate) struct PresenceToken {
+    canonical_path: PathBuf,
+}
+
+impl PresenceToken {
+    pub(crate) fn capture(path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            canonical_path: path
+                .canonicalize()
+                .with_context(|| format!("Vault path is unavailable: {}", path.display()))?,
+        })
+    }
+
+    pub(crate) fn is_present(&self) -> bool {
+        self.canonical_path.canonicalize().ok().as_ref() == Some(&self.canonical_path)
+    }
+}
+
 const DISCOVERY_SCRIPT: &str = r#"
 $systemDrive = $env:SystemDrive
 $result = @(Get-CimInstance Win32_DiskDrive | ForEach-Object {
