@@ -68,6 +68,9 @@ enum Action {
     AssignIds,
     MigrateTimeless,
     DriveCreate(DriveCreateMode),
+    DriveMigrate {
+        source: Option<PathBuf>,
+    },
     Unlock {
         drive: Option<PathBuf>,
         workspace: Option<VaultWorkspaceId>,
@@ -151,6 +154,13 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
             no_arguments(remaining, Action::MigrateTimeless, "nit -migrate-timeless")
         }
         "-drive-create" => parse_drive_create(remaining),
+        "-drive-migrate" => match remaining {
+            [] => Ok(Action::DriveMigrate { source: None }),
+            [source] => Ok(Action::DriveMigrate {
+                source: Some(PathBuf::from(source)),
+            }),
+            _ => bail!("usage: nit -drive-migrate [plain-workspace-path]"),
+        },
         "-unlock" => parse_unlock(remaining),
         "-lock" => no_arguments(remaining, Action::Lock, "nit -lock"),
         "-session-status" => no_arguments(remaining, Action::SessionStatus, "nit -session-status"),
@@ -402,6 +412,7 @@ fn execute(action: Action) -> Result<()> {
             Ok(())
         }
         Action::DriveCreate(mode) => create_nit_drive(mode),
+        Action::DriveMigrate { source } => migrate_plain_workspace_to_drive(source),
         Action::Unlock { drive, workspace } => unlock_nit_drive(drive, workspace),
         Action::Lock => {
             let client = SessionClient::default();
@@ -531,6 +542,56 @@ fn create_nit_drive(mode: DriveCreateMode) -> Result<()> {
             print_initialized_drive(&initialized)
         }
     }
+}
+
+fn migrate_plain_workspace_to_drive(source: Option<PathBuf>) -> Result<()> {
+    let source = match source {
+        Some(source) => source,
+        None => std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            anyhow::anyhow!("home directory is unavailable; provide the Plain workspace path")
+        })?,
+    };
+    let workspace = Workspace::discover_from(&source).with_context(|| {
+        format!(
+            "no Plain NIT workspace could be discovered from {}",
+            source.display()
+        )
+    })?;
+    let source = Nit::open(&workspace)?;
+    let target = SessionClient::default();
+    match target.status() {
+        Ok(SessionStatus::Unlocked { .. }) => {}
+        Ok(SessionStatus::Unavailable) => {
+            bail!("NIT Drive is unavailable; reconnect it and run the migration again")
+        }
+        Ok(SessionStatus::Locked) | Err(_) => unlock_nit_drive(None, None)?,
+    }
+    let (active, archived) = copy_workspace(&source, &target)?;
+    println!(
+        "Migration complete.\nSource preserved: {}\nActive entries: {active}\nArchived entries: {archived}",
+        workspace.nit_dir().display()
+    );
+    Ok(())
+}
+
+fn copy_workspace(source: &dyn NitApi, target: &dyn NitApi) -> Result<(usize, usize)> {
+    let (target_active, target_archived) = target.all()?;
+    let (active, archived) = source.all()?;
+    if active.entries.is_empty() && archived.entries.is_empty() {
+        bail!("source Plain workspace has no entries to migrate");
+    }
+    if !target_active.entries.is_empty() || !target_archived.entries.is_empty() {
+        if target_active == active && target_archived == archived {
+            return Ok((active.entries.len(), archived.entries.len()));
+        }
+        bail!("target Vault workspace is not empty; refusing to merge or overwrite entries");
+    }
+    target.save_all(&active, &archived)?;
+    let (verified_active, verified_archived) = target.all()?;
+    if verified_active != active || verified_archived != archived {
+        bail!("Vault verification failed after migration");
+    }
+    Ok((active.entries.len(), archived.entries.len()))
 }
 
 #[derive(Debug)]
@@ -1040,6 +1101,7 @@ fn execute_in_workspace(
         | Action::AssignIds
         | Action::MigrateTimeless
         | Action::DriveCreate(_)
+        | Action::DriveMigrate { .. }
         | Action::Unlock { .. }
         | Action::Lock
         | Action::SessionStatus
@@ -1121,6 +1183,7 @@ Usage:
   nit -drive-create <device-id>            Prepare one explicitly named device
   nit -drive-create --initialize <device-id> <mount-path>
                                            Finish a formatted, mounted device
+  nit -drive-migrate [plain-path]          Copy Plain storage into an empty Drive
   nit -unlock                              Find and unlock a mounted NIT Drive
   nit -unlock <drive-path> [workspace-id]  Advanced explicit unlock
   nit -lock                                Lock the active Vault session
@@ -1283,6 +1346,54 @@ mod tests {
         );
         assert!(parse_arguments(words(&["-drive-create", "--dry-run"])).is_err());
         assert!(parse_arguments(words(&["-drive-create", "--initialize", "/dev/sdb",])).is_err());
+    }
+
+    #[test]
+    fn drive_migration_defaults_to_home_and_accepts_an_explicit_source() {
+        assert_eq!(
+            parse_arguments(words(&["-drive-migrate"])).unwrap(),
+            Action::DriveMigrate { source: None }
+        );
+        assert_eq!(
+            parse_arguments(words(&["-drive-migrate", "/home/user"])).unwrap(),
+            Action::DriveMigrate {
+                source: Some(PathBuf::from("/home/user")),
+            }
+        );
+        assert!(parse_arguments(words(&["-drive-migrate", "/home/user", "extra",])).is_err());
+    }
+
+    #[test]
+    fn workspace_migration_preserves_active_archive_and_refuses_nonempty_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let source_workspace = Workspace::init(&source_root).unwrap().workspace;
+        let source = Nit::open(&source_workspace).unwrap();
+        let vault = std::sync::Arc::new(
+            nit_core::vault::Vault::create(
+                temp.path().join("vault"),
+                &SecretString::from("password".to_owned()),
+            )
+            .unwrap(),
+        );
+        let target_workspace = Nit::create_vault_workspace(&vault, "Target").unwrap();
+        let target = Nit::open_vault(vault, target_workspace.id).unwrap();
+        let archived = source
+            .create(Kind::Note, None, "Archived note".into())
+            .unwrap();
+        source.archive(&archived.to_string()).unwrap();
+        source
+            .create(Kind::Todo, Some(Horizon::Short), "Active task".into())
+            .unwrap();
+
+        assert_eq!(copy_workspace(&source, &target).unwrap(), (1, 1));
+        assert_eq!(target.all().unwrap(), source.all().unwrap());
+        assert_eq!(copy_workspace(&source, &target).unwrap(), (1, 1));
+        target
+            .create(Kind::Item, None, "Different target entry".into())
+            .unwrap();
+        assert!(copy_workspace(&source, &target).is_err());
     }
 
     #[test]

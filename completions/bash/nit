@@ -32,7 +32,7 @@ _nit() {
             COMPREPLY=($(compgen -W "$(nit -completion-ids 2>/dev/null)" -- "$current"))
             return
             ;;
-        -import)
+        -import|-drive-migrate)
             COMPREPLY=($(compgen -f -- "$current"))
             return
             ;;
@@ -55,7 +55,7 @@ _nit() {
     esac
 
     if (( COMP_CWORD == 1 )) || [[ "$current" == -* ]]; then
-        candidates="-init -migrate -assign-ids -migrate-timeless -drive-create -unlock -lock -session-status -ai-roadmap -root -path -status -search -ls -show -edit -archive -import -completions -tui -help -version -si -mi -li -st -mt -lt -n -x"
+        candidates="-init -migrate -assign-ids -migrate-timeless -drive-create -drive-migrate -unlock -lock -session-status -ai-roadmap -root -path -status -search -ls -show -edit -archive -import -completions -tui -help -version -si -mi -li -st -mt -lt -n -x"
         COMPREPLY=($(compgen -W "$candidates" -- "$current"))
     fi
 }

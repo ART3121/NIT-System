@@ -125,6 +125,9 @@ impl Repository {
                     bail!("workspace changed since it was loaded; reload before saving to avoid losing data");
                 }
                 *current = notes.clone();
+                state
+                    .sequences
+                    .reconcile([&state.active, &state.archived])?;
                 Ok(())
             });
         }
@@ -153,6 +156,9 @@ impl Repository {
                 }
                 state.active = active.clone();
                 state.archived = archived.clone();
+                state
+                    .sequences
+                    .reconcile([&state.active, &state.archived])?;
                 Ok(())
             });
         }

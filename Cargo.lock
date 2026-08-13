@@ -644,6 +644,7 @@ dependencies = [
  "nit-tui",
  "rpassword",
  "secrecy",
+ "tempfile",
  "zeroize",
 ]
 

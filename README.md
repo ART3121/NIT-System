@@ -545,6 +545,7 @@ Use `nit -ls` and `nit -show` to invoke those operations.
 | `nit -migrate-timeless` | Convert legacy timed Note and Item IDs safely |
 | `nit -drive-create [<device-id>]` | Interactively prepare a removable device as a NIT Drive |
 | `nit -drive-create --dry-run <device-id>` | Validate and preview provisioning without mutation |
+| `nit -drive-migrate [plain-path]` | Copy a Plain workspace into an empty NIT Drive; defaults to home |
 | `nit -unlock` | Find and unlock a NIT Drive for shared CLI/TUI use |
 | `nit -unlock <drive-path> [workspace-id]` | Advanced explicit Drive/workspace selection |
 | `nit -session-status` | Show locked, unlocked, unavailable, or absent Agent state |

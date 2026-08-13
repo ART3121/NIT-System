@@ -207,6 +207,27 @@ example `\\.\PHYSICALDRIVE2`) and the assigned drive root (for example `E:\`).
 Formatting requires administrator privileges and the platform tools documented
 below. No test or CI path executes real formatting commands.
 
+## Migrating Plain storage
+
+After creating a Drive, copy an existing Plain workspace without deleting or
+modifying the source:
+
+```bash
+# Defaults to the user's home workspace
+nit -drive-migrate
+
+# Or select a Plain workspace explicitly
+nit -drive-migrate /path/to/project
+```
+
+The command discovers and unlocks the mounted NIT Drive, requires the target
+workspace to be empty, copies active and archived collections in one Core
+transaction, then reads both collections back and compares them with the
+source. IDs, classifications, Note bodies, and Roadmaps are preserved. A
+non-empty target is rejected rather than merged, avoiding ambiguous ID
+collisions; an already identical target is accepted as an idempotent retry. The
+source `.nit/` remains untouched as a recoverable original.
+
 ### Rust API sequence
 
 Discovery and preview are separate from mutation:

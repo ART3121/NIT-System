@@ -84,6 +84,7 @@ it still reports a locked state. `nit -session-status` reports:
 | `nit -drive-create` | Discover, explicitly select, format, and initialize a NIT Drive |
 | `nit -drive-create --dry-run <device-id>` | Preview a validated plan without running commands |
 | `nit -drive-create --initialize <device-id> <mount>` | Initialize formatted and mounted media without reformatting |
+| `nit -drive-migrate [plain-path]` | Copy active and archived Plain entries into an empty NIT Drive workspace |
 | `nit -unlock` | Discover and unlock a mounted NIT Drive |
 | `nit -unlock <drive> [workspace-id]` | Advanced explicit Drive/workspace selection |
 | `nit -lock` | Destroy the active Vault session |

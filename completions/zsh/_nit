@@ -9,6 +9,7 @@ _nit() {
         '-assign-ids:Assign missing IDs'
         '-migrate-timeless:Migrate legacy timed IDs'
         '-drive-create:Create a NIT Drive'
+        '-drive-migrate:Copy Plain storage into a NIT Drive'
         '-unlock:Unlock a Vault session'
         '-lock:Lock the Vault session'
         '-session-status:Show Vault session state'
@@ -53,7 +54,7 @@ _nit() {
             ids=("${(@f)$(nit -completion-ids 2>/dev/null)}")
             _describe 'entry ID' ids
             ;;
-        -import) _files ;;
+        -import|-drive-migrate) _files ;;
         -unlock) _files ;;
         -drive-create) _values 'mode' --dry-run --initialize ;;
         -completions) _values 'shell' bash zsh fish ;;

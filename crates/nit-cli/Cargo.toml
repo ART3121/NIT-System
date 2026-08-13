@@ -18,3 +18,6 @@ nit-tui = { path = "../nit-tui" }
 rpassword.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
