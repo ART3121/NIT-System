@@ -249,6 +249,11 @@ fn sync_tree(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn read_text_limited(path: &Path, limit: u64) -> Result<String> {
+    let bytes = read_bytes_limited(path, limit)?;
+    String::from_utf8(bytes).with_context(|| format!("{} is not valid UTF-8", path.display()))
+}
+
+pub(crate) fn read_bytes_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
     reject_symlink(path)?;
     let metadata =
         fs::metadata(path).with_context(|| format!("could not inspect {}", path.display()))?;
@@ -271,7 +276,7 @@ pub(crate) fn read_text_limited(path: &Path, limit: u64) -> Result<String> {
     if bytes.len() as u64 > limit {
         bail!("{} exceeds the {} byte limit", path.display(), limit);
     }
-    String::from_utf8(bytes).with_context(|| format!("{} is not valid UTF-8", path.display()))
+    Ok(bytes)
 }
 
 pub(crate) fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {

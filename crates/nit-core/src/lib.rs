@@ -4,6 +4,7 @@ mod ids;
 mod model;
 mod repository;
 mod storage;
+pub mod vault;
 mod workspace;
 
 pub use commands::{capture_text, find_index, parse_capture_code, text};
