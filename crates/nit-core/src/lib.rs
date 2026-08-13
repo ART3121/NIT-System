@@ -17,6 +17,7 @@ pub use workspace::{appears_ignored, ensure_private, migrate, InitResult, Worksp
 
 use anyhow::Result;
 use repository::Repository;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -25,16 +26,39 @@ pub struct Nit {
     snapshots: Arc<Mutex<[Option<Notes>; 2]>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocatedEntry {
     pub view: View,
     pub entry: Entry,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub active_entries: usize,
     pub archived_entries: usize,
+}
+
+/// Shared domain API implemented by an in-process `Nit` and by the desktop
+/// Session client. Frontends depend on this surface instead of storage details.
+pub trait NitApi {
+    fn allows_external_editor(&self) -> bool;
+    fn load(&self, view: View) -> Result<Notes>;
+    fn save(&self, view: View, notes: &Notes) -> Result<()>;
+    fn all(&self) -> Result<(Notes, Notes)>;
+    fn save_all(&self, active: &Notes, archived: &Notes) -> Result<()>;
+    fn status(&self) -> Result<Status>;
+    fn find_by_id(&self, id: EntryId) -> Result<LocatedEntry>;
+    fn search(
+        &self,
+        query: &str,
+        views: &[View],
+        classification: Option<(Kind, Option<Horizon>)>,
+    ) -> Result<Vec<(View, Entry)>>;
+    fn create(&self, kind: Kind, horizon: Option<Horizon>, text: String) -> Result<EntryId>;
+    fn archive(&self, query: &str) -> Result<()>;
+    fn import(&self, source: &std::path::Path) -> Result<usize>;
+    fn roadmap_target(&self, id: EntryId) -> Result<Entry>;
+    fn attach_roadmap(&self, entry: &Entry, roadmap: Roadmap) -> Result<()>;
 }
 
 impl Nit {
@@ -84,8 +108,13 @@ impl Nit {
 
     pub fn save(&self, view: View, notes: &Notes) -> Result<()> {
         let expected = self.expected(view)?;
-        self.repository.save_if_unchanged(view, &expected, notes)?;
+        self.save_if_unchanged(view, &expected, notes)?;
         self.remember(view, notes)
+    }
+
+    #[doc(hidden)]
+    pub fn save_if_unchanged(&self, view: View, expected: &Notes, notes: &Notes) -> Result<()> {
+        self.repository.save_if_unchanged(view, expected, notes)
     }
 
     pub fn all(&self) -> Result<(Notes, Notes)> {
@@ -102,12 +131,7 @@ impl Nit {
     pub fn save_all(&self, active: &Notes, archived: &Notes) -> Result<()> {
         let expected_active = self.expected(View::Active)?;
         let expected_archived = self.expected(View::Archived)?;
-        self.repository.save_all_if_unchanged(
-            &expected_active,
-            &expected_archived,
-            active,
-            archived,
-        )?;
+        self.save_all_if_unchanged(&expected_active, &expected_archived, active, archived)?;
         let mut snapshots = self
             .snapshots
             .lock()
@@ -115,6 +139,18 @@ impl Nit {
         snapshots[0] = Some(active.clone());
         snapshots[1] = Some(archived.clone());
         Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn save_all_if_unchanged(
+        &self,
+        expected_active: &Notes,
+        expected_archived: &Notes,
+        active: &Notes,
+        archived: &Notes,
+    ) -> Result<()> {
+        self.repository
+            .save_all_if_unchanged(expected_active, expected_archived, active, archived)
     }
 
     pub fn status(&self) -> Result<Status> {
@@ -212,6 +248,65 @@ impl Nit {
             [view_index(view)]
         .clone()
         .ok_or_else(|| anyhow::anyhow!("load this workspace view before saving it"))
+    }
+}
+
+impl NitApi for Nit {
+    fn allows_external_editor(&self) -> bool {
+        true
+    }
+
+    fn load(&self, view: View) -> Result<Notes> {
+        Self::load(self, view)
+    }
+
+    fn save(&self, view: View, notes: &Notes) -> Result<()> {
+        Self::save(self, view, notes)
+    }
+
+    fn all(&self) -> Result<(Notes, Notes)> {
+        Self::all(self)
+    }
+
+    fn save_all(&self, active: &Notes, archived: &Notes) -> Result<()> {
+        Self::save_all(self, active, archived)
+    }
+
+    fn status(&self) -> Result<Status> {
+        Self::status(self)
+    }
+
+    fn find_by_id(&self, id: EntryId) -> Result<LocatedEntry> {
+        Self::find_by_id(self, id)
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        views: &[View],
+        classification: Option<(Kind, Option<Horizon>)>,
+    ) -> Result<Vec<(View, Entry)>> {
+        Self::search(self, query, views, classification)
+    }
+
+    fn create(&self, kind: Kind, horizon: Option<Horizon>, text: String) -> Result<EntryId> {
+        Self::create(self, kind, horizon, text)
+    }
+
+    fn archive(&self, query: &str) -> Result<()> {
+        Self::archive(self, query)
+    }
+
+    fn import(&self, source: &std::path::Path) -> Result<usize> {
+        Self::import(self, source)
+    }
+
+    fn roadmap_target(&self, id: EntryId) -> Result<Entry> {
+        Self::roadmap_target(self, id)
+    }
+
+    fn attach_roadmap(&self, entry: &Entry, roadmap: Roadmap) -> Result<()> {
+        Self::attach_roadmap(self, entry, roadmap)
     }
 }
 

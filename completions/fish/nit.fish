@@ -7,6 +7,9 @@ complete -c nit -f -a '-init' -d 'Create a workspace'
 complete -c nit -f -a '-migrate' -d 'Migrate legacy storage'
 complete -c nit -f -a '-assign-ids' -d 'Assign missing IDs'
 complete -c nit -f -a '-migrate-timeless' -d 'Migrate legacy timed IDs'
+complete -c nit -f -a '-unlock' -d 'Unlock a Vault session'
+complete -c nit -f -a '-lock' -d 'Lock the Vault session'
+complete -c nit -f -a '-session-status' -d 'Show Vault session state'
 complete -c nit -f -a '-ai-roadmap' -d 'Generate an AI Roadmap'
 complete -c nit -f -a '-root' -d 'Print workspace root'
 complete -c nit -f -a '-path' -d 'Print storage path'
@@ -38,3 +41,4 @@ complete -c nit -n '__nit_using_command -show; or __nit_using_command -edit' -f 
 complete -c nit -n '__nit_using_command -archive; or __nit_using_command -ai-roadmap' -f -a '(nit -completion-ids 2>/dev/null)'
 complete -c nit -n '__nit_using_command -completions' -f -a 'bash zsh fish'
 complete -c nit -n '__nit_using_command -import' -F
+complete -c nit -n '__nit_using_command -unlock' -F

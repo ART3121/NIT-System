@@ -8,6 +8,9 @@ _nit() {
         '-migrate:Migrate legacy storage'
         '-assign-ids:Assign missing IDs'
         '-migrate-timeless:Migrate legacy timed IDs'
+        '-unlock:Unlock a Vault session'
+        '-lock:Lock the Vault session'
+        '-session-status:Show Vault session state'
         '-ai-roadmap:Generate an AI Roadmap'
         '-root:Print workspace root'
         '-path:Print storage path'
@@ -50,6 +53,7 @@ _nit() {
             _describe 'entry ID' ids
             ;;
         -import) _files ;;
+        -unlock) _files ;;
         -completions) _values 'shell' bash zsh fish ;;
         *) _describe 'capture code' codes ;;
     esac

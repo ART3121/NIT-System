@@ -26,7 +26,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, layout::Rect, widgets::ListState, Terminal};
 
 use nit_ai::{generate_roadmap_cancellable, GenerateOutcome};
-use nit_core::{capture_text, Entry, EntryId, Horizon, Kind, Nit, Notes, Roadmap, View};
+use nit_core::{capture_text, Entry, EntryId, Horizon, Kind, NitApi, Notes, Roadmap, View};
 use nit_editor as editor;
 use viewer::NoteViewerState;
 
@@ -283,7 +283,7 @@ fn start_ai(app: &mut App, entry: Entry, allow_pull: bool) {
     };
 }
 
-fn start_selected_roadmap(app: &mut App, notes: &Notes, indexes: &[usize], nit: &Nit) {
+fn start_selected_roadmap(app: &mut App, notes: &Notes, indexes: &[usize], nit: &dyn NitApi) {
     if app.archived {
         app.message = "AI Roadmaps can only target active entries.".into();
     } else if app.ai_receiver.is_some() {
@@ -447,7 +447,7 @@ fn toggle_tree(app: &mut App) {
     }
 }
 
-fn start_roadmap_for_id(app: &mut App, nit: &Nit, id: EntryId) {
+fn start_roadmap_for_id(app: &mut App, nit: &dyn NitApi, id: EntryId) {
     if app.archived {
         app.message = "AI Roadmaps can only target active entries.".into();
     } else if app.ai_receiver.is_some() {
@@ -494,7 +494,7 @@ fn apply_edited_entry(entry: &mut Entry, edited: &str) -> Result<()> {
     Ok(())
 }
 
-fn capture(input: &str, notes: &mut Notes, app: &mut App, nit: &Nit) -> Result<()> {
+fn capture(input: &str, notes: &mut Notes, app: &mut App, nit: &dyn NitApi) -> Result<()> {
     let mut parts = input.split_whitespace();
     if parts.next() != Some("w") {
         bail!("Use :w <text> -st to add, or :q to quit.");
@@ -552,11 +552,11 @@ fn ai_dialog_action(key: &KeyEvent) -> Option<AiDialogAction> {
     }
 }
 
-pub fn run(nit: &Nit) -> Result<()> {
+pub fn run(nit: &dyn NitApi) -> Result<()> {
     run_session(nit)
 }
 
-fn run_session(nit: &Nit) -> Result<()> {
+fn run_session(nit: &dyn NitApi) -> Result<()> {
     let (mut notes, archived_notes) = nit.all()?;
     let missing_ids = notes
         .entries
@@ -1031,6 +1031,10 @@ fn run_session(nit: &Nit) -> Result<()> {
                         }
                     }
                     KeyCode::Char('e') => {
+                        if !nit.allows_external_editor() {
+                            app.message = "External editing is disabled for Vault Storage.".into();
+                            continue;
+                        }
                         let id = match &app.screen {
                             Screen::NoteViewer(viewer) => viewer.id,
                             Screen::Browser => unreachable!(),
@@ -1164,6 +1168,12 @@ fn run_session(nit: &Nit) -> Result<()> {
                     app.message = "Reloaded.".into();
                 }
                 KeyCode::Char('c') if !app.archived => {
+                    if !nit.allows_external_editor() {
+                        app.message =
+                            "External drafting is disabled for Vault Storage; use quick capture."
+                                .into();
+                        continue;
+                    }
                     terminal.clear()?;
                     disable_raw_mode()?;
                     execute!(
@@ -1277,6 +1287,10 @@ fn run_session(nit: &Nit) -> Result<()> {
                     }
                 }
                 KeyCode::Char('e') => {
+                    if !nit.allows_external_editor() {
+                        app.message = "External editing is disabled for Vault Storage.".into();
+                        continue;
+                    }
                     if let Some(index) = indexes.get(app.selected) {
                         terminal.clear()?;
                         disable_raw_mode()?;
@@ -1336,6 +1350,8 @@ fn classification_label(kind: Kind, horizon: Option<Horizon>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use nit_core::Nit;
+
     use std::fs;
 
     use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};

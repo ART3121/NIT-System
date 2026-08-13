@@ -1,6 +1,7 @@
 use std::{collections::HashSet, fs, path::Path, sync::Arc};
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     fsutil::{
@@ -15,7 +16,7 @@ use crate::{
     workspace::Workspace,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum View {
     Active,
     Archived,

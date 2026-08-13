@@ -12,4 +12,6 @@ anyhow.workspace = true
 nit-ai = { path = "../nit-ai" }
 nit-core = { path = "../nit-core" }
 nit-editor = { path = "../nit-editor" }
+nit-session = { path = "../nit-session" }
 nit-tui = { path = "../nit-tui" }
+rpassword.workspace = true

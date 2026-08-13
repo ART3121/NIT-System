@@ -1,16 +1,21 @@
 use std::{
     io::{self, IsTerminal, Write},
     path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use nit_ai::{generate_roadmap, roadmap_text, GenerateOutcome};
 use nit_core::{
     appears_ignored, capture_text, ensure_private, find_index, migrate, parse_capture_code,
-    render_notes, text, EntryId, Horizon, Kind, Nit, View, Workspace, ACTIVE_TITLE, ARCHIVE_TITLE,
+    render_notes, text, EntryId, Horizon, Kind, Nit, NitApi, VaultWorkspaceId, View, Workspace,
+    ACTIVE_TITLE, ARCHIVE_TITLE,
 };
 use nit_editor as editor;
+use nit_session::{default_endpoint, SessionAgent, SessionClient, SessionStatus};
 use nit_tui as tui;
 
 fn write_stdout(arguments: std::fmt::Arguments<'_>) -> Result<()> {
@@ -54,6 +59,12 @@ enum Action {
     Status,
     AssignIds,
     MigrateTimeless,
+    Unlock {
+        vault: PathBuf,
+        workspace: VaultWorkspaceId,
+    },
+    Lock,
+    SessionStatus,
     AiRoadmap(EntryId),
     Search {
         query: Vec<String>,
@@ -101,6 +112,9 @@ impl CompletionShell {
 
 pub fn run() -> Result<()> {
     let arguments = std::env::args().skip(1).collect();
+    if arguments == ["--session-agent-internal"] {
+        return SessionAgent::serve(&default_endpoint());
+    }
     execute(parse_arguments(arguments)?)
 }
 
@@ -120,6 +134,15 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
         "-migrate-timeless" => {
             no_arguments(remaining, Action::MigrateTimeless, "nit -migrate-timeless")
         }
+        "-unlock" => match remaining {
+            [vault, workspace] => Ok(Action::Unlock {
+                vault: PathBuf::from(vault),
+                workspace: workspace.parse()?,
+            }),
+            _ => bail!("usage: nit -unlock <vault-path> <workspace-id>"),
+        },
+        "-lock" => no_arguments(remaining, Action::Lock, "nit -lock"),
+        "-session-status" => no_arguments(remaining, Action::SessionStatus, "nit -session-status"),
         "-v" => bail!("`nit -v` was removed in 0.4.0; use `nitcat <NOTE-ID>`"),
         "-ai-roadmap" => match remaining {
             [id] => EntryId::parse(id)
@@ -321,11 +344,97 @@ fn execute(action: Action) -> Result<()> {
             }
             Ok(())
         }
-        action => {
-            let nit = Nit::discover()?;
-            execute_in_workspace(action, &nit)
+        Action::Unlock { vault, workspace } => {
+            let client = ensure_session_agent()?;
+            let password = rpassword::prompt_password("Vault password: ")?;
+            let status = client.unlock(vault, workspace, password)?;
+            print_session_status(&status)
         }
+        Action::Lock => {
+            let client = SessionClient::default();
+            match client.lock() {
+                Ok(status) => print_session_status(&status),
+                Err(_) => {
+                    println!("NIT Vault is locked.");
+                    Ok(())
+                }
+            }
+        }
+        Action::SessionStatus => {
+            let client = SessionClient::default();
+            match client.status() {
+                Ok(status) => print_session_status(&status),
+                Err(_) => {
+                    println!("NIT Session Agent is not running.");
+                    Ok(())
+                }
+            }
+        }
+        action => match Nit::discover() {
+            Ok(nit) => {
+                let workspace = nit
+                    .workspace()
+                    .expect("a discovered NIT instance uses Plain Storage");
+                execute_in_workspace(action, &nit, StorageContext::Plain(workspace))
+            }
+            Err(plain_error) => {
+                let client = SessionClient::default();
+                match client.status() {
+                    Ok(status @ SessionStatus::Unlocked { .. }) => {
+                        execute_in_workspace(action, &client, StorageContext::Vault(status))
+                    }
+                    Ok(SessionStatus::Unavailable) => {
+                        bail!("NIT Drive is unavailable; reconnect and run `nit -unlock` again")
+                    }
+                    Ok(SessionStatus::Locked) | Err(_) => Err(plain_error),
+                }
+            }
+        },
     }
+}
+
+fn ensure_session_agent() -> Result<SessionClient> {
+    let client = SessionClient::default();
+    if client.status().is_ok() {
+        return Ok(client);
+    }
+    let executable = std::env::current_exe()?;
+    Command::new(executable)
+        .arg("--session-agent-internal")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("could not start NIT Session Agent")?;
+    for _ in 0..100 {
+        if client.status().is_ok() {
+            return Ok(client);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    bail!("NIT Session Agent did not start")
+}
+
+fn print_session_status(status: &SessionStatus) -> Result<()> {
+    match status {
+        SessionStatus::Locked => println!("NIT Vault is locked."),
+        SessionStatus::Unavailable => {
+            println!("NIT Drive is unavailable and must be unlocked again.")
+        }
+        SessionStatus::Unlocked {
+            vault_id,
+            workspace_id,
+            workspace_name,
+        } => println!(
+            "NIT Vault unlocked.\nVault: {vault_id}\nWorkspace: {workspace_name} ({workspace_id})"
+        ),
+    }
+    Ok(())
+}
+
+enum StorageContext<'a> {
+    Plain(&'a Workspace),
+    Vault(SessionStatus),
 }
 
 fn initialize(mode: InitMode) -> Result<()> {
@@ -353,10 +462,11 @@ fn initialize(mode: InitMode) -> Result<()> {
     Ok(())
 }
 
-fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
-    let workspace = nit
-        .workspace()
-        .ok_or_else(|| anyhow::anyhow!("this command requires a Plain Storage workspace path"))?;
+fn execute_in_workspace(
+    action: Action,
+    nit: &dyn NitApi,
+    storage: StorageContext<'_>,
+) -> Result<()> {
     match action {
         Action::Tui => tui::run(nit)?,
         Action::Capture(message) => {
@@ -364,17 +474,35 @@ fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
             let id = nit.create(kind, horizon, value)?;
             println!("Added {id} ({}).", classification_label(kind, horizon));
         }
-        Action::Root => println!("{}", workspace.root().display()),
-        Action::Path => println!("{}", workspace.nit_dir().display()),
+        Action::Root => match &storage {
+            StorageContext::Plain(workspace) => println!("{}", workspace.root().display()),
+            StorageContext::Vault(_) => bail!("Vault workspaces have no host project root"),
+        },
+        Action::Path => match &storage {
+            StorageContext::Plain(workspace) => println!("{}", workspace.nit_dir().display()),
+            StorageContext::Vault(_) => bail!("Vault storage paths are intentionally opaque"),
+        },
         Action::Status => {
             let status = nit.status()?;
-            println!(
-                "NIT Workspace\n\nRoot: {}\nStorage: {}\nActive entries: {}\nArchived entries: {}",
-                workspace.root().display(),
-                workspace.nit_dir().display(),
-                status.active_entries,
-                status.archived_entries
-            );
+            match &storage {
+                StorageContext::Plain(workspace) => println!(
+                    "NIT Workspace\n\nRoot: {}\nStorage: {}\nActive entries: {}\nArchived entries: {}",
+                    workspace.root().display(),
+                    workspace.nit_dir().display(),
+                    status.active_entries,
+                    status.archived_entries
+                ),
+                StorageContext::Vault(SessionStatus::Unlocked {
+                    vault_id,
+                    workspace_id,
+                    workspace_name,
+                }) => println!(
+                    "NIT Vault Workspace\n\nVault: {vault_id}\nWorkspace: {workspace_name} ({workspace_id})\nActive entries: {}\nArchived entries: {}",
+                    status.active_entries,
+                    status.archived_entries
+                ),
+                StorageContext::Vault(_) => unreachable!("only unlocked sessions execute commands"),
+            }
         }
         Action::AiRoadmap(id) => execute_ai_roadmap(nit, id)?,
         Action::Search {
@@ -462,6 +590,9 @@ fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
             }
         }
         Action::Edit { query, archived } => {
+            if matches!(storage, StorageContext::Vault(_)) {
+                bail!("external editing is disabled for Vault Storage to avoid plaintext temporary files");
+            }
             let view = if archived {
                 View::Archived
             } else {
@@ -510,6 +641,9 @@ fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
         | Action::Migrate
         | Action::AssignIds
         | Action::MigrateTimeless
+        | Action::Unlock { .. }
+        | Action::Lock
+        | Action::SessionStatus
         | Action::Completions(_)
         | Action::Help
         | Action::Version => {
@@ -519,7 +653,7 @@ fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
     Ok(())
 }
 
-fn execute_ai_roadmap(nit: &Nit, id: EntryId) -> Result<()> {
+fn execute_ai_roadmap(nit: &dyn NitApi, id: EntryId) -> Result<()> {
     let entry = nit.roadmap_target(id)?;
     println!("Preparing local Ollama and generating a Roadmap for {id}…");
     io::stdout().flush()?;
@@ -583,6 +717,9 @@ Usage:
   nit -migrate                             Migrate legacy files
   nit -assign-ids                          Assign IDs to existing entries
   nit -migrate-timeless                    Convert timed Note/Item IDs safely
+  nit -unlock <vault-path> <workspace-id>  Unlock a Vault in the Session Agent
+  nit -lock                                Lock the active Vault session
+  nit -session-status                      Show Vault session state
   nit -ai-roadmap <ID>                     Generate a local AI Roadmap
   nit -root                                Print the workspace root
   nit -path                                Print the .nit directory
@@ -668,6 +805,30 @@ mod tests {
         );
         assert!(parse_arguments(words(&["-ai-roadmap"])).is_err());
         assert!(parse_arguments(words(&["-ai-roadmap", "not-an-id"])).is_err());
+    }
+
+    #[test]
+    fn vault_session_commands_follow_the_existing_single_dash_parser() {
+        let workspace = "00112233445566778899aabbccddeeff"
+            .parse::<VaultWorkspaceId>()
+            .unwrap();
+        assert_eq!(
+            parse_arguments(words(&[
+                "-unlock",
+                "/media/user/NIT/vault",
+                "00112233445566778899aabbccddeeff",
+            ]))
+            .unwrap(),
+            Action::Unlock {
+                vault: PathBuf::from("/media/user/NIT/vault"),
+                workspace,
+            }
+        );
+        assert_eq!(parse_arguments(words(&["-lock"])).unwrap(), Action::Lock);
+        assert_eq!(
+            parse_arguments(words(&["-session-status"])).unwrap(),
+            Action::SessionStatus
+        );
     }
 
     #[test]

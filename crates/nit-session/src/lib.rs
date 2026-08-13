@@ -8,12 +8,15 @@
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use interprocess::local_socket::prelude::*;
-use nit_core::{vault::Vault, Nit, VaultWorkspaceId};
+use nit_core::{
+    vault::Vault, Entry, EntryId, Horizon, Kind, LocatedEntry, Nit, NitApi, Notes, Roadmap,
+    Status as NitStatus, VaultWorkspaceId, View,
+};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -21,7 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 mod transport;
 
 const PROTOCOL_VERSION: u16 = 1;
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE_BYTES: usize = 128 * 1024 * 1024 + 1024 * 1024;
 
 /// Public session state returned without exposing key material or plaintext.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +55,62 @@ enum Request {
     Shutdown {
         protocol: u16,
     },
+    Load {
+        protocol: u16,
+        view: View,
+    },
+    Save {
+        protocol: u16,
+        view: View,
+        expected: Notes,
+        notes: Notes,
+    },
+    All {
+        protocol: u16,
+    },
+    SaveAll {
+        protocol: u16,
+        expected_active: Notes,
+        expected_archived: Notes,
+        active: Notes,
+        archived: Notes,
+    },
+    NitStatus {
+        protocol: u16,
+    },
+    FindById {
+        protocol: u16,
+        id: EntryId,
+    },
+    Search {
+        protocol: u16,
+        query: String,
+        views: Vec<View>,
+        classification: Option<(Kind, Option<Horizon>)>,
+    },
+    Create {
+        protocol: u16,
+        kind: Kind,
+        horizon: Option<Horizon>,
+        text: String,
+    },
+    Archive {
+        protocol: u16,
+        query: String,
+    },
+    Import {
+        protocol: u16,
+        source: PathBuf,
+    },
+    RoadmapTarget {
+        protocol: u16,
+        id: EntryId,
+    },
+    AttachRoadmap {
+        protocol: u16,
+        entry: Entry,
+        roadmap: Roadmap,
+    },
 }
 
 impl Request {
@@ -60,20 +119,47 @@ impl Request {
             Self::Status { protocol }
             | Self::Unlock { protocol, .. }
             | Self::Lock { protocol }
-            | Self::Shutdown { protocol } => *protocol,
+            | Self::Shutdown { protocol }
+            | Self::Load { protocol, .. }
+            | Self::Save { protocol, .. }
+            | Self::All { protocol }
+            | Self::SaveAll { protocol, .. }
+            | Self::NitStatus { protocol }
+            | Self::FindById { protocol, .. }
+            | Self::Search { protocol, .. }
+            | Self::Create { protocol, .. }
+            | Self::Archive { protocol, .. }
+            | Self::Import { protocol, .. }
+            | Self::RoadmapTarget { protocol, .. }
+            | Self::AttachRoadmap { protocol, .. } => *protocol,
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+enum Reply {
+    Session(SessionStatus),
+    Notes(Notes),
+    All(Notes, Notes),
+    NitStatus(NitStatus),
+    LocatedEntry(LocatedEntry),
+    Matches(Vec<(View, Entry)>),
+    EntryId(EntryId),
+    Entry(Entry),
+    Count(usize),
+    Unit,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Response {
     protocol: u16,
     status: SessionStatus,
+    reply: Option<Reply>,
     error: Option<String>,
 }
 
 struct UnlockedSession {
-    _nit: Nit,
+    nit: Nit,
     vault_path: PathBuf,
     vault_id: String,
     workspace_id: String,
@@ -122,7 +208,7 @@ impl AgentState {
             .vault_workspace()?
             .ok_or_else(|| anyhow!("Vault workspace is unavailable"))?;
         self.unlocked = Some(UnlockedSession {
-            _nit: nit,
+            nit,
             vault_path: vault.path().to_path_buf(),
             vault_id,
             workspace_id: info.id.to_string(),
@@ -136,6 +222,20 @@ impl AgentState {
         self.unlocked = None;
         self.unavailable = false;
         SessionStatus::Locked
+    }
+
+    fn nit(&mut self) -> Result<&Nit> {
+        match self.status() {
+            SessionStatus::Unlocked { .. } => Ok(&self
+                .unlocked
+                .as_ref()
+                .expect("unlocked status requires a session")
+                .nit),
+            SessionStatus::Unavailable => {
+                bail!("NIT Drive is unavailable; reconnect and unlock it again")
+            }
+            SessionStatus::Locked => bail!("NIT Vault is locked; run `nit -unlock` first"),
+        }
     }
 }
 
@@ -160,6 +260,7 @@ impl SessionAgent {
                         Response {
                             protocol: PROTOCOL_VERSION,
                             status: state.status(),
+                            reply: None,
                             error: Some(error.to_string()),
                         },
                     )?;
@@ -182,12 +283,14 @@ impl SessionAgent {
 #[derive(Clone, Debug)]
 pub struct SessionClient {
     endpoint: String,
+    snapshots: Arc<Mutex<[Option<Notes>; 2]>>,
 }
 
 impl Default for SessionClient {
     fn default() -> Self {
         Self {
             endpoint: default_endpoint(),
+            snapshots: Arc::new(Mutex::new([None, None])),
         }
     }
 }
@@ -196,13 +299,19 @@ impl SessionClient {
     pub fn new(endpoint: impl Into<String>) -> Result<Self> {
         let endpoint = endpoint.into();
         validate_endpoint(&endpoint)?;
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            snapshots: Arc::new(Mutex::new([None, None])),
+        })
     }
 
     pub fn status(&self) -> Result<SessionStatus> {
-        self.call(Request::Status {
+        match self.call(Request::Status {
             protocol: PROTOCOL_VERSION,
-        })
+        })? {
+            Reply::Session(status) => Ok(status),
+            _ => bail!("invalid NIT Session status response"),
+        }
     }
 
     pub fn unlock(
@@ -218,23 +327,38 @@ impl SessionClient {
             password: std::mem::take(&mut password),
         };
         password.zeroize();
-        self.call(request)
+        match self.call(request)? {
+            Reply::Session(status) => {
+                self.clear_snapshots()?;
+                Ok(status)
+            }
+            _ => bail!("invalid NIT Session unlock response"),
+        }
     }
 
     pub fn lock(&self) -> Result<SessionStatus> {
-        self.call(Request::Lock {
+        match self.call(Request::Lock {
             protocol: PROTOCOL_VERSION,
-        })
+        })? {
+            Reply::Session(status) => {
+                self.clear_snapshots()?;
+                Ok(status)
+            }
+            _ => bail!("invalid NIT Session lock response"),
+        }
     }
 
     #[doc(hidden)]
     pub fn shutdown_agent(&self) -> Result<SessionStatus> {
-        self.call(Request::Shutdown {
+        match self.call(Request::Shutdown {
             protocol: PROTOCOL_VERSION,
-        })
+        })? {
+            Reply::Session(status) => Ok(status),
+            _ => bail!("invalid NIT Session shutdown response"),
+        }
     }
 
-    fn call(&self, request: Request) -> Result<SessionStatus> {
+    fn call(&self, request: Request) -> Result<Reply> {
         let mut connection = transport::connect(&self.endpoint)?;
         write_message(&mut connection, &request)?;
         let response: Response = read_message(&mut connection)?;
@@ -244,7 +368,201 @@ impl SessionClient {
         if let Some(error) = response.error {
             bail!(error);
         }
-        Ok(response.status)
+        response
+            .reply
+            .ok_or_else(|| anyhow!("NIT Session Agent returned no result"))
+    }
+}
+
+impl NitApi for SessionClient {
+    fn allows_external_editor(&self) -> bool {
+        false
+    }
+
+    fn load(&self, view: View) -> Result<Notes> {
+        let notes = match self.call(Request::Load {
+            protocol: PROTOCOL_VERSION,
+            view,
+        })? {
+            Reply::Notes(notes) => notes,
+            _ => bail!("invalid NIT Session load response"),
+        };
+        self.remember(view, &notes)?;
+        Ok(notes)
+    }
+
+    fn save(&self, view: View, notes: &Notes) -> Result<()> {
+        let expected = self.expected(view)?;
+        expect_unit(self.call(Request::Save {
+            protocol: PROTOCOL_VERSION,
+            view,
+            expected,
+            notes: notes.clone(),
+        })?)?;
+        self.remember(view, notes)
+    }
+
+    fn all(&self) -> Result<(Notes, Notes)> {
+        let (active, archived) = match self.call(Request::All {
+            protocol: PROTOCOL_VERSION,
+        })? {
+            Reply::All(active, archived) => (active, archived),
+            _ => bail!("invalid NIT Session all response"),
+        };
+        self.remember_all(&active, &archived)?;
+        Ok((active, archived))
+    }
+
+    fn save_all(&self, active: &Notes, archived: &Notes) -> Result<()> {
+        let expected_active = self.expected(View::Active)?;
+        let expected_archived = self.expected(View::Archived)?;
+        expect_unit(self.call(Request::SaveAll {
+            protocol: PROTOCOL_VERSION,
+            expected_active,
+            expected_archived,
+            active: active.clone(),
+            archived: archived.clone(),
+        })?)?;
+        self.remember_all(active, archived)
+    }
+
+    fn status(&self) -> Result<NitStatus> {
+        match self.call(Request::NitStatus {
+            protocol: PROTOCOL_VERSION,
+        })? {
+            Reply::NitStatus(status) => Ok(status),
+            _ => bail!("invalid NIT Session NIT status response"),
+        }
+    }
+
+    fn find_by_id(&self, id: EntryId) -> Result<LocatedEntry> {
+        match self.call(Request::FindById {
+            protocol: PROTOCOL_VERSION,
+            id,
+        })? {
+            Reply::LocatedEntry(entry) => Ok(entry),
+            _ => bail!("invalid NIT Session find response"),
+        }
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        views: &[View],
+        classification: Option<(Kind, Option<Horizon>)>,
+    ) -> Result<Vec<(View, Entry)>> {
+        match self.call(Request::Search {
+            protocol: PROTOCOL_VERSION,
+            query: query.to_owned(),
+            views: views.to_vec(),
+            classification,
+        })? {
+            Reply::Matches(matches) => Ok(matches),
+            _ => bail!("invalid NIT Session search response"),
+        }
+    }
+
+    fn create(&self, kind: Kind, horizon: Option<Horizon>, text: String) -> Result<EntryId> {
+        let id = match self.call(Request::Create {
+            protocol: PROTOCOL_VERSION,
+            kind,
+            horizon,
+            text,
+        })? {
+            Reply::EntryId(id) => id,
+            _ => bail!("invalid NIT Session create response"),
+        };
+        self.all()?;
+        Ok(id)
+    }
+
+    fn archive(&self, query: &str) -> Result<()> {
+        expect_unit(self.call(Request::Archive {
+            protocol: PROTOCOL_VERSION,
+            query: query.to_owned(),
+        })?)?;
+        self.all().map(|_| ())
+    }
+
+    fn import(&self, source: &Path) -> Result<usize> {
+        let count = match self.call(Request::Import {
+            protocol: PROTOCOL_VERSION,
+            source: source.to_path_buf(),
+        })? {
+            Reply::Count(count) => count,
+            _ => bail!("invalid NIT Session import response"),
+        };
+        self.all()?;
+        Ok(count)
+    }
+
+    fn roadmap_target(&self, id: EntryId) -> Result<Entry> {
+        match self.call(Request::RoadmapTarget {
+            protocol: PROTOCOL_VERSION,
+            id,
+        })? {
+            Reply::Entry(entry) => Ok(entry),
+            _ => bail!("invalid NIT Session Roadmap response"),
+        }
+    }
+
+    fn attach_roadmap(&self, entry: &Entry, roadmap: Roadmap) -> Result<()> {
+        expect_unit(self.call(Request::AttachRoadmap {
+            protocol: PROTOCOL_VERSION,
+            entry: entry.clone(),
+            roadmap,
+        })?)?;
+        self.all().map(|_| ())
+    }
+}
+
+impl SessionClient {
+    fn clear_snapshots(&self) -> Result<()> {
+        *self
+            .snapshots
+            .lock()
+            .map_err(|_| anyhow!("session snapshot state is unavailable"))? = [None, None];
+        Ok(())
+    }
+
+    fn remember(&self, view: View, notes: &Notes) -> Result<()> {
+        self.snapshots
+            .lock()
+            .map_err(|_| anyhow!("session snapshot state is unavailable"))?[view_index(view)] =
+            Some(notes.clone());
+        Ok(())
+    }
+
+    fn remember_all(&self, active: &Notes, archived: &Notes) -> Result<()> {
+        let mut snapshots = self
+            .snapshots
+            .lock()
+            .map_err(|_| anyhow!("session snapshot state is unavailable"))?;
+        snapshots[0] = Some(active.clone());
+        snapshots[1] = Some(archived.clone());
+        Ok(())
+    }
+
+    fn expected(&self, view: View) -> Result<Notes> {
+        self.snapshots
+            .lock()
+            .map_err(|_| anyhow!("session snapshot state is unavailable"))?[view_index(view)]
+        .clone()
+        .ok_or_else(|| anyhow!("load this workspace view before saving it"))
+    }
+}
+
+fn view_index(view: View) -> usize {
+    match view {
+        View::Active => 0,
+        View::Archived => 1,
+    }
+}
+
+fn expect_unit(reply: Reply) -> Result<()> {
+    match reply {
+        Reply::Unit => Ok(()),
+        _ => bail!("invalid NIT Session operation response"),
     }
 }
 
@@ -253,11 +571,12 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
         return Response {
             protocol: PROTOCOL_VERSION,
             status: state.status(),
+            reply: None,
             error: Some("incompatible NIT Session Agent protocol".into()),
         };
     }
-    let result = match &mut request {
-        Request::Status { .. } => Ok(state.status()),
+    let result: Result<Reply> = match &mut request {
+        Request::Status { .. } => Ok(Reply::Session(state.status())),
         Request::Unlock {
             vault_path,
             workspace_id,
@@ -265,14 +584,89 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
             ..
         } => {
             let secret = SecretString::from(std::mem::take(password));
-            state.unlock(vault_path, workspace_id, secret)
+            state
+                .unlock(vault_path, workspace_id, secret)
+                .map(Reply::Session)
         }
-        Request::Lock { .. } | Request::Shutdown { .. } => Ok(state.lock()),
+        Request::Lock { .. } | Request::Shutdown { .. } => Ok(Reply::Session(state.lock())),
+        Request::Load { view, .. } => state
+            .nit()
+            .and_then(|nit| nit.load(*view))
+            .map(Reply::Notes),
+        Request::Save {
+            view,
+            expected,
+            notes,
+            ..
+        } => state
+            .nit()
+            .and_then(|nit| nit.save_if_unchanged(*view, expected, notes))
+            .map(|()| Reply::Unit),
+        Request::All { .. } => state
+            .nit()
+            .and_then(Nit::all)
+            .map(|(active, archived)| Reply::All(active, archived)),
+        Request::SaveAll {
+            expected_active,
+            expected_archived,
+            active,
+            archived,
+            ..
+        } => state
+            .nit()
+            .and_then(|nit| {
+                nit.save_all_if_unchanged(expected_active, expected_archived, active, archived)
+            })
+            .map(|()| Reply::Unit),
+        Request::NitStatus { .. } => state.nit().and_then(Nit::status).map(Reply::NitStatus),
+        Request::FindById { id, .. } => state
+            .nit()
+            .and_then(|nit| nit.find_by_id(*id))
+            .map(Reply::LocatedEntry),
+        Request::Search {
+            query,
+            views,
+            classification,
+            ..
+        } => state
+            .nit()
+            .and_then(|nit| nit.search(query, views, *classification))
+            .map(Reply::Matches),
+        Request::Create {
+            kind,
+            horizon,
+            text,
+            ..
+        } => state
+            .nit()
+            .and_then(|nit| nit.create(*kind, *horizon, std::mem::take(text)))
+            .map(Reply::EntryId),
+        Request::Archive { query, .. } => state
+            .nit()
+            .and_then(|nit| nit.archive(query))
+            .map(|()| Reply::Unit),
+        Request::Import { source, .. } => state
+            .nit()
+            .and_then(|nit| nit.import(source))
+            .map(Reply::Count),
+        Request::RoadmapTarget { id, .. } => state
+            .nit()
+            .and_then(|nit| nit.roadmap_target(*id))
+            .map(Reply::Entry),
+        Request::AttachRoadmap { entry, roadmap, .. } => state
+            .nit()
+            .and_then(|nit| nit.attach_roadmap(entry, roadmap.clone()))
+            .map(|()| Reply::Unit),
+    };
+    let (reply, error) = match result {
+        Ok(reply) => (Some(reply), None),
+        Err(error) => (None, Some(error.to_string())),
     };
     Response {
         protocol: PROTOCOL_VERSION,
         status: state.status(),
-        error: result.err().map(|error| error.to_string()),
+        reply,
+        error,
     }
 }
 
@@ -416,6 +810,12 @@ mod tests {
             second.status().unwrap(),
             SessionStatus::Unlocked { .. }
         ));
+        let stale = NitApi::load(&second, View::Active).unwrap();
+        let id = NitApi::create(&first, Kind::Note, None, "Shared through IPC".into()).unwrap();
+        assert_eq!(id.to_string(), "N-0001");
+        assert_eq!(NitApi::load(&first, View::Active).unwrap().entries.len(), 1);
+        assert!(NitApi::save(&second, View::Active, &stale).is_err());
+        assert_eq!(NitApi::status(&first).unwrap().active_entries, 1);
         assert_eq!(second.lock().unwrap(), SessionStatus::Locked);
         assert_eq!(first.status().unwrap(), SessionStatus::Locked);
         first.shutdown_agent().unwrap();

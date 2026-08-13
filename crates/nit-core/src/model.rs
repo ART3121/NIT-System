@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 pub const HORIZONS: [Horizon; 3] = [Horizon::Short, Horizon::Medium, Horizon::Long];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     Idea,
     Note,
@@ -47,7 +49,7 @@ impl std::fmt::Display for Kind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Horizon {
     Short,
     Medium,
@@ -90,7 +92,7 @@ pub fn valid_classification(kind: Kind, horizon: Option<Horizon>) -> bool {
     kind.uses_horizon() == horizon.is_some()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntryId {
     horizon: Option<Horizon>,
     kind: Kind,
@@ -198,18 +200,18 @@ pub(crate) fn legacy_classification_from_code(value: &str) -> Option<(Horizon, K
     characters.next().is_none().then_some((horizon, kind))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoadmapStep {
     pub title: String,
     pub description: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roadmap {
     pub steps: Vec<RoadmapStep>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: Option<EntryId>,
     pub kind: Kind,
@@ -262,7 +264,7 @@ fn text_matches(value: &str, lowercase_query: &str) -> bool {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notes {
     pub entries: Vec<Entry>,
 }
