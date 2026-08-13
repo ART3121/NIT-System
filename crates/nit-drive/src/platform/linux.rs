@@ -114,8 +114,18 @@ pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<Pl
         },
         PlannedOperation {
             program: "mkfs.exfat".into(),
-            arguments: vec!["-n".into(), "NIT_DRIVE".into(), partition],
+            arguments: vec!["-n".into(), "NIT_DRIVE".into(), partition.clone()],
             destructive: true,
+        },
+        PlannedOperation {
+            program: "udevadm".into(),
+            arguments: vec!["settle".into(), "--timeout=10".into()],
+            destructive: false,
+        },
+        PlannedOperation {
+            program: "udisksctl".into(),
+            arguments: vec!["mount".into(), "--block-device".into(), partition],
+            destructive: false,
         },
     ]);
     Ok(operations)
@@ -519,6 +529,29 @@ mod tests {
         let devices = discover_from(&sys, &mountinfo).unwrap();
         assert!(devices[0].system_disk);
         assert!(devices[0].is_ambiguous());
+    }
+
+    #[test]
+    fn provisioning_mounts_the_new_partition_without_a_shell() {
+        let device = RemovableDevice {
+            id: "/dev/sdb".into(),
+            model: "Test USB".into(),
+            capacity_bytes: 16 * 1024 * 1024 * 1024,
+            mount_points: vec![PathBuf::from("/media/OLD")],
+            removable: true,
+            system_disk: false,
+            read_only: false,
+        };
+        let operations = provisioning_operations(&device).unwrap();
+        assert!(operations.iter().all(|operation| operation.program != "sh"));
+        assert!(operations.iter().any(|operation| {
+            operation.program == "mkfs.exfat"
+                && operation.arguments.last().map(String::as_str) == Some("/dev/sdb1")
+        }));
+        let mount = operations.last().unwrap();
+        assert_eq!(mount.program, "udisksctl");
+        assert_eq!(mount.arguments, ["mount", "--block-device", "/dev/sdb1"]);
+        assert!(!mount.destructive);
     }
 
     #[test]

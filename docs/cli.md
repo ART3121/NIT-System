@@ -80,6 +80,9 @@ it still reports a locked state. `nit -session-status` reports:
 | `nit -migrate` | Explicitly migrate legacy Plain storage |
 | `nit -assign-ids` | Plain-only ID maintenance |
 | `nit -migrate-timeless` | Plain-only legacy ID migration |
+| `nit -drive-create` | Discover, explicitly select, format, and initialize a NIT Drive |
+| `nit -drive-create --dry-run <device-id>` | Preview a validated plan without running commands |
+| `nit -drive-create --initialize <device-id> <mount>` | Initialize formatted and mounted media without reformatting |
 | `nit -unlock <drive> <workspace-id>` | Unlock/reuse a NIT Drive session |
 | `nit -lock` | Destroy the active Vault session |
 | `nit -session-status` | Inspect session state |

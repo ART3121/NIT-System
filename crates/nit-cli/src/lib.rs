@@ -14,9 +14,14 @@ use nit_core::{
     render_notes, text, EntryId, Horizon, Kind, Nit, NitApi, VaultWorkspaceId, View, Workspace,
     ACTIVE_TITLE, ARCHIVE_TITLE,
 };
+use nit_drive::{
+    discover_devices, InitializedDrive, NitDriveInitializer, Provisioner, RemovableDevice,
+};
 use nit_editor as editor;
 use nit_session::{default_endpoint, SessionAgent, SessionClient, SessionStatus};
 use nit_tui as tui;
+use secrecy::SecretString;
+use zeroize::Zeroize;
 
 fn write_stdout(arguments: std::fmt::Arguments<'_>) -> Result<()> {
     match io::stdout().lock().write_fmt(arguments) {
@@ -59,6 +64,7 @@ enum Action {
     Status,
     AssignIds,
     MigrateTimeless,
+    DriveCreate(DriveCreateMode),
     Unlock {
         vault: PathBuf,
         workspace: VaultWorkspaceId,
@@ -90,6 +96,13 @@ enum Action {
     CompletionIds,
     Help,
     Version,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DriveCreateMode {
+    Interactive { device_id: Option<String> },
+    DryRun { device_id: String },
+    Initialize { device_id: String, mount: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +147,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
         "-migrate-timeless" => {
             no_arguments(remaining, Action::MigrateTimeless, "nit -migrate-timeless")
         }
+        "-drive-create" => parse_drive_create(remaining),
         "-unlock" => match remaining {
             [vault, workspace] => Ok(Action::Unlock {
                 vault: PathBuf::from(vault),
@@ -180,6 +194,32 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
         }
         _ => Ok(Action::Capture(arguments)),
     }
+}
+
+fn parse_drive_create(arguments: &[String]) -> Result<Action> {
+    let mode = match arguments {
+        [] => DriveCreateMode::Interactive { device_id: None },
+        [device_id] if !device_id.starts_with('-') => DriveCreateMode::Interactive {
+            device_id: Some(device_id.clone()),
+        },
+        [option, device_id] if option == "--dry-run" && !device_id.starts_with('-') => {
+            DriveCreateMode::DryRun {
+                device_id: device_id.clone(),
+            }
+        }
+        [option, device_id, mount]
+            if option == "--initialize" && !device_id.starts_with('-') =>
+        {
+            DriveCreateMode::Initialize {
+                device_id: device_id.clone(),
+                mount: PathBuf::from(mount),
+            }
+        }
+        _ => bail!(
+            "usage: nit -drive-create [<device-id> | --dry-run <device-id> | --initialize <device-id> <mount-path>]"
+        ),
+    };
+    Ok(Action::DriveCreate(mode))
 }
 
 fn parse_init(arguments: &[String]) -> Result<Action> {
@@ -346,6 +386,7 @@ fn execute(action: Action) -> Result<()> {
             }
             Ok(())
         }
+        Action::DriveCreate(mode) => create_nit_drive(mode),
         Action::Unlock { vault, workspace } => {
             let client = ensure_session_agent()?;
             let password = rpassword::prompt_password("Vault password: ")?;
@@ -390,6 +431,232 @@ fn execute(action: Action) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+fn create_nit_drive(mode: DriveCreateMode) -> Result<()> {
+    match mode {
+        DriveCreateMode::DryRun { device_id } => {
+            let plan = Provisioner::default().dry_run(&device_id)?;
+            print_provisioning_plan(&plan)
+        }
+        DriveCreateMode::Initialize { device_id, mount } => {
+            require_interactive_terminal()?;
+            let device = Provisioner::default().dry_run(&device_id)?.device;
+            print_discovered_devices(std::slice::from_ref(&device))?;
+            println!(
+                "\nInitialize mounted removable device\n\nDevice: {device_id}\nMount:  {}",
+                mount.display()
+            );
+            let workspace_name = prompt_workspace_name()?;
+            let password = prompt_new_vault_password()?;
+            let expected = format!(
+                "CREATE {device_id} {} {} {}",
+                device.model,
+                device.capacity_bytes,
+                mount.display()
+            );
+            let confirmation = prompt_line(&format!(
+                "Type exactly to create the Vault:\n{expected}\n> "
+            ))?;
+            if confirmation != expected {
+                bail!("initialization confirmation does not match; nothing was changed");
+            }
+            let initialized = NitDriveInitializer::default().initialize(
+                &device_id,
+                &mount,
+                &password,
+                workspace_name,
+            )?;
+            print_initialized_drive(&initialized)
+        }
+        DriveCreateMode::Interactive { device_id } => {
+            require_interactive_terminal()?;
+            let device_id = match device_id {
+                Some(device_id) => device_id,
+                None => {
+                    print_discovered_devices(&discover_devices()?)?;
+                    let selected =
+                        prompt_line("\nType the exact device ID to prepare (empty cancels): ")?;
+                    if selected.is_empty() {
+                        println!("Cancelled; nothing was changed.");
+                        return Ok(());
+                    }
+                    selected
+                }
+            };
+            let provisioner = Provisioner::default();
+            let plan = provisioner.dry_run(&device_id)?;
+            print_provisioning_plan(&plan)?;
+            println!(
+                "\nWARNING: every partition and every byte currently stored on this device will be erased."
+            );
+            let workspace_name = prompt_workspace_name()?;
+            let password = prompt_new_vault_password()?;
+            let confirmation = prompt_line(&format!(
+                "Type the following line exactly to continue:\n{}\n> ",
+                plan.confirmation
+            ))?;
+            if confirmation != plan.confirmation {
+                bail!("destructive confirmation does not match; nothing was changed");
+            }
+            let verified = provisioner
+                .execute(&device_id, &confirmation)
+                .with_context(|| {
+                    format!(
+                        "NIT Drive provisioning did not complete; the device may be partially modified. Re-discover it before retrying. If it is already formatted and mounted, use `nit -drive-create --initialize {device_id} <mount-path>`"
+                    )
+                })?;
+            let mount = unique_mount_point(&verified).with_context(|| {
+                format!(
+                    "device was formatted but no unique mount point is available; mount NIT_DRIVE and run `nit -drive-create --initialize {device_id} <mount-path>`"
+                )
+            })?;
+            let initialized = NitDriveInitializer::default().initialize(
+                &device_id,
+                &mount,
+                &password,
+                workspace_name,
+            )?;
+            print_initialized_drive(&initialized)
+        }
+    }
+}
+
+fn print_discovered_devices(devices: &[RemovableDevice]) -> Result<()> {
+    println!("Discovered physical devices:\n");
+    if devices.is_empty() {
+        println!("No physical devices were discovered.");
+        return Ok(());
+    }
+    for device in devices {
+        let mounts = if device.mount_points.is_empty() {
+            "not mounted".to_owned()
+        } else {
+            device
+                .mount_points
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "{}\n  model: {}\n  size:  {} ({} bytes)\n  mount: {}\n  state: {}",
+            device.id,
+            device.model,
+            human_capacity(device.capacity_bytes),
+            device.capacity_bytes,
+            mounts,
+            device_safety_label(device)
+        );
+    }
+    Ok(())
+}
+
+fn print_provisioning_plan(plan: &nit_drive::ProvisioningPlan) -> Result<()> {
+    print_discovered_devices(std::slice::from_ref(&plan.device))?;
+    println!("\nDry-run provisioning plan:");
+    for (index, operation) in plan.operations.iter().enumerate() {
+        let kind = if operation.destructive {
+            "DESTRUCTIVE"
+        } else {
+            "support"
+        };
+        println!(
+            "  {}. [{kind}] {} {:?}",
+            index + 1,
+            operation.program,
+            operation.arguments
+        );
+    }
+    println!("\nRequired confirmation:\n{}", plan.confirmation);
+    Ok(())
+}
+
+fn print_initialized_drive(initialized: &InitializedDrive) -> Result<()> {
+    println!(
+        "\nNIT Drive ready.\nDrive: {}\nMount: {}\nWorkspace: {} ({})\n\nUnlock it with:\nnit -unlock {} {}",
+        initialized.drive.id(),
+        initialized.drive.root().display(),
+        initialized.workspace.name,
+        initialized.workspace.id,
+        initialized.drive.root().display(),
+        initialized.workspace.id
+    );
+    Ok(())
+}
+
+fn require_interactive_terminal() -> Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!("NIT Drive creation requires an interactive terminal; use --dry-run for read-only inspection");
+    }
+    Ok(())
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    Ok(value.trim().to_owned())
+}
+
+fn prompt_workspace_name() -> Result<String> {
+    let name = prompt_line("Initial workspace name: ")?;
+    if name.is_empty() {
+        bail!("workspace name cannot be empty");
+    }
+    Ok(name)
+}
+
+fn prompt_new_vault_password() -> Result<SecretString> {
+    let mut password = rpassword::prompt_password("Vault password: ")?;
+    let mut repeated = rpassword::prompt_password("Confirm Vault password: ")?;
+    if password.is_empty() {
+        password.zeroize();
+        repeated.zeroize();
+        bail!("Vault password cannot be empty");
+    }
+    if password != repeated {
+        password.zeroize();
+        repeated.zeroize();
+        bail!("Vault passwords do not match");
+    }
+    repeated.zeroize();
+    Ok(SecretString::from(password))
+}
+
+fn unique_mount_point(device: &RemovableDevice) -> Result<PathBuf> {
+    match device.mount_points.as_slice() {
+        [mount] => Ok(mount.clone()),
+        [] => bail!("the formatted device is not mounted"),
+        _ => bail!("the formatted device has multiple mount points; refusing an ambiguous target"),
+    }
+}
+
+fn human_capacity(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
+}
+
+fn device_safety_label(device: &RemovableDevice) -> &'static str {
+    if device.system_disk {
+        "REJECTED: system/root/boot disk"
+    } else if !device.removable {
+        "REJECTED: fixed/internal disk"
+    } else if device.read_only {
+        "REJECTED: read-only"
+    } else if device.is_ambiguous() {
+        "REJECTED: ambiguous metadata"
+    } else if device.capacity_bytes < 64 * 1024 * 1024 {
+        "REJECTED: too small"
+    } else {
+        "eligible removable device"
     }
 }
 
@@ -668,6 +935,7 @@ fn execute_in_workspace(
         | Action::Migrate
         | Action::AssignIds
         | Action::MigrateTimeless
+        | Action::DriveCreate(_)
         | Action::Unlock { .. }
         | Action::Lock
         | Action::SessionStatus
@@ -744,6 +1012,11 @@ Usage:
   nit -migrate                             Migrate legacy files
   nit -assign-ids                          Assign IDs to existing entries
   nit -migrate-timeless                    Convert timed Note/Item IDs safely
+  nit -drive-create                        Interactively create a NIT Drive
+  nit -drive-create --dry-run <device-id>  Preview without changing the device
+  nit -drive-create <device-id>            Prepare one explicitly named device
+  nit -drive-create --initialize <device-id> <mount-path>
+                                           Finish a formatted, mounted device
   nit -unlock <drive-path> <workspace-id>  Unlock a NIT Drive session
   nit -lock                                Lock the active Vault session
   nit -session-status                      Show Vault session state
@@ -856,6 +1129,77 @@ mod tests {
             parse_arguments(words(&["-session-status"])).unwrap(),
             Action::SessionStatus
         );
+    }
+
+    #[test]
+    fn drive_create_parser_separates_preview_format_and_recovery() {
+        assert_eq!(
+            parse_arguments(words(&["-drive-create"])).unwrap(),
+            Action::DriveCreate(DriveCreateMode::Interactive { device_id: None })
+        );
+        assert_eq!(
+            parse_arguments(words(&["-drive-create", "/dev/sdb"])).unwrap(),
+            Action::DriveCreate(DriveCreateMode::Interactive {
+                device_id: Some("/dev/sdb".into()),
+            })
+        );
+        assert_eq!(
+            parse_arguments(words(&["-drive-create", "--dry-run", "/dev/sdb",])).unwrap(),
+            Action::DriveCreate(DriveCreateMode::DryRun {
+                device_id: "/dev/sdb".into(),
+            })
+        );
+        assert_eq!(
+            parse_arguments(words(&[
+                "-drive-create",
+                "--initialize",
+                "/dev/sdb",
+                "/media/NIT_DRIVE",
+            ]))
+            .unwrap(),
+            Action::DriveCreate(DriveCreateMode::Initialize {
+                device_id: "/dev/sdb".into(),
+                mount: PathBuf::from("/media/NIT_DRIVE"),
+            })
+        );
+        assert!(parse_arguments(words(&["-drive-create", "--dry-run"])).is_err());
+        assert!(parse_arguments(words(&["-drive-create", "--initialize", "/dev/sdb",])).is_err());
+    }
+
+    #[test]
+    fn drive_creation_refuses_ambiguous_mount_selection() {
+        let mut device = removable_device();
+        assert!(unique_mount_point(&device).is_err());
+        device.mount_points.push(PathBuf::from("/media/NIT"));
+        assert_eq!(
+            unique_mount_point(&device).unwrap(),
+            PathBuf::from("/media/NIT")
+        );
+        device.mount_points.push(PathBuf::from("/mnt/NIT"));
+        assert!(unique_mount_point(&device).is_err());
+    }
+
+    #[test]
+    fn drive_listing_marks_unsafe_targets() {
+        let mut device = removable_device();
+        assert_eq!(device_safety_label(&device), "eligible removable device");
+        device.system_disk = true;
+        assert_eq!(
+            device_safety_label(&device),
+            "REJECTED: system/root/boot disk"
+        );
+    }
+
+    fn removable_device() -> RemovableDevice {
+        RemovableDevice {
+            id: "/dev/sdb".into(),
+            model: "Test USB".into(),
+            capacity_bytes: 16 * 1024 * 1024 * 1024,
+            mount_points: Vec::new(),
+            removable: true,
+            system_disk: false,
+            read_only: false,
+        }
     }
 
     #[test]

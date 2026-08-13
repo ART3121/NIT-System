@@ -129,7 +129,8 @@ Every exit status is checked; failure aborts remaining operations.
 2. `wipefs --all <device>`;
 3. create a GPT and one full-size partition with `parted --script`;
 4. refresh/settle device state with `partprobe` and `udevadm`;
-5. create an exFAT filesystem labeled `NIT_DRIVE` with `mkfs.exfat`.
+5. create an exFAT filesystem labeled `NIT_DRIVE` with `mkfs.exfat`;
+6. settle device state again and mount the new partition with `udisksctl`.
 
 Accepted whole-disk identifiers are conservatively limited to known `/dev/sd*`,
 `vd*`, `xvd*`, `hd*`, `nvme*n*`, and `mmcblk*` forms. Formatting normally
@@ -161,9 +162,39 @@ directory or partially prepared media, but cannot install a valid-looking Drive
 before all authenticated metadata is ready.
 
 The discovery, dry-run, execution, and initialization APIs exist in the
-`nit-drive` Rust crate. A public end-user CLI/GUI wizard for formatting has not
-yet been exposed; this is intentional because the destructive workflow still
-requires a carefully designed selector and confirmation UI.
+`nit-drive` Rust crate and are exposed by one explicit CLI workflow:
+
+```bash
+# Interactive discovery, selection, confirmation, formatting, and initialization
+nit -drive-create
+
+# Same destructive flow with an already known exact device ID
+nit -drive-create /dev/sdb
+
+# Read-only validation and command preview
+nit -drive-create --dry-run /dev/sdb
+```
+
+The interactive path never selects a device automatically. It displays model,
+capacity, mount points, and safety state; asks for the initial workspace and
+password twice; then requires the exact confirmation string from the fresh
+dry-run. Immediately before execution, `Provisioner` repeats discovery,
+fingerprint comparison, and every P0 target validation.
+
+If the filesystem was created but could not be mounted automatically, mount the
+volume using the operating system and initialize it without formatting again:
+
+```bash
+nit -drive-create --initialize /dev/sdb /media/user/NIT_DRIVE
+```
+
+`--initialize` repeats removable-device validation and verifies that the path is
+a discovered mount point of that exact device. It refuses existing NIT Drive
+metadata. On Windows, use the physical identifier reported by the wizard (for
+example `\\.\PHYSICALDRIVE2`) and the assigned drive root (for example `E:\`).
+
+Formatting requires administrator privileges and the platform tools documented
+below. No test or CI path executes real formatting commands.
 
 ### Rust API sequence
 

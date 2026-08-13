@@ -638,10 +638,13 @@ dependencies = [
  "anyhow",
  "nit-ai",
  "nit-core",
+ "nit-drive",
  "nit-editor",
  "nit-session",
  "nit-tui",
  "rpassword",
+ "secrecy",
+ "zeroize",
 ]
 
 [[package]]

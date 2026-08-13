@@ -121,8 +121,9 @@ read-only discovery
 ```
 
 The provisioning and initialization APIs are implemented in `nit-drive`.
-Formatting is not exposed as a casual capture command and is never exercised
-against real media in CI.
+The CLI exposes them through the explicit `nit -drive-create` administrative
+workflow. It remains separate from capture/workspace dispatch and is never
+exercised against real media in CI.
 
 ### TUI
 

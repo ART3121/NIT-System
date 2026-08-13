@@ -419,6 +419,31 @@ Local workspace ──> Plain .nit/ (current default)
 NIT Drive       ──> mandatory encrypted Vault
 ```
 
+Create a NIT Drive from a removable device with the interactive, destructive
+wizard:
+
+```bash
+nit -drive-create
+```
+
+The wizard lists fresh OS discovery data and requires the exact physical device
+identifier, an initial workspace name, a password entered twice, and the full
+`ERASE <id> <model> <bytes>` confirmation. It never selects the first device
+automatically. Preview the validated platform plan without changing media:
+
+```bash
+nit -drive-create --dry-run /dev/sdb
+```
+
+On Windows, use the physical identifier printed by discovery, for example
+`\\.\PHYSICALDRIVE2`. Formatting requires administrator privileges and erases
+the complete selected device. If formatting completed but automatic mounting
+did not, mount the `NIT_DRIVE` volume and finish without formatting it again:
+
+```bash
+nit -drive-create --initialize /dev/sdb /media/user/NIT_DRIVE
+```
+
 A Vault can contain multiple independent workspaces. Each uses a random stable
 32-character workspace ID rather than a host path. The password derives a Key
 Encryption Key with Argon2id, unwraps a random Master Key, and that Master Key
@@ -459,8 +484,9 @@ commands fail explicitly and never fall back to a nearby `.nit/`.
 
 The `nit-drive` Rust crate implements read-only discovery, conservative dry-run,
 validated formatting plans for Linux/Windows, and authenticated Drive/Vault
-initialization. A public formatting wizard is not yet exposed in the CLI or TUI;
-no real device is formatted automatically or during tests. See the complete
+initialization. The CLI exposes this only through the explicit
+`nit -drive-create` administrative workflow; no real device is formatted
+automatically or during tests. See the complete
 [NIT Drive guide](docs/NIT_DRIVE.md), [Vault format](docs/vault.md), and
 [Session lifecycle](docs/session.md).
 
@@ -517,6 +543,8 @@ Use `nit -ls` and `nit -show` to invoke those operations.
 | `nit -migrate` | Migrate legacy `.notes` storage explicitly |
 | `nit -assign-ids` | Assign IDs to imported or legacy entries that lack them |
 | `nit -migrate-timeless` | Convert legacy timed Note and Item IDs safely |
+| `nit -drive-create [<device-id>]` | Interactively prepare a removable device as a NIT Drive |
+| `nit -drive-create --dry-run <device-id>` | Validate and preview provisioning without mutation |
 | `nit -unlock <drive-path> <workspace-id>` | Unlock a NIT Drive for shared CLI/TUI use |
 | `nit -session-status` | Show locked, unlocked, unavailable, or absent Agent state |
 | `nit -lock` | Destroy the active Vault session and discard its key |
