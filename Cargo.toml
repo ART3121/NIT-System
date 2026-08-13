@@ -15,6 +15,7 @@ members = [
     "crates/nit-ai",
     "crates/nit-cli",
     "crates/nit-core",
+    "crates/nit-drive",
     "crates/nit-editor",
     "crates/nit-session",
     "crates/nit-tui",
