@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "nit-ai"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "nit-core",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "nit-cli"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "nit-ai",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "nit-core"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "nit-drive"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "getrandom",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "nit-editor"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "tempfile",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "nit-session"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "interprocess",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "nit-system"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "nit-cli",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "nit-tui"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "nitcat"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "crossterm",

@@ -44,7 +44,7 @@ fn nitcat(directory: &Path, arguments: &[&str]) -> Output {
 #[test]
 fn suite_binaries_share_the_workspace_version() {
     let root = temporary_directory("versions");
-    assert_eq!(successful(&root, &["-version"]).trim(), "nit 0.4.0");
+    assert_eq!(successful(&root, &["-version"]).trim(), "nit 0.6.0");
     let output = Command::new(env!("CARGO_BIN_EXE_nitcat"))
         .current_dir(&root)
         .arg("-version")
@@ -53,7 +53,7 @@ fn suite_binaries_share_the_workspace_version() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        "nitcat 0.4.0"
+        "nitcat 0.6.0"
     );
 
     let removed = nit(&root, &["-v", "N-0001"]);

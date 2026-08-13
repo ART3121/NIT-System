@@ -6,6 +6,12 @@ from the same source revision.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-13
+
+Version 0.6 introduces native encrypted Vault storage, shared ephemeral unlock
+sessions, and end-to-end removable NIT Drive provisioning and migration while
+keeping existing Plain workspaces unchanged.
+
 ### Added
 
 - NIT Vault v1 as an authenticated encrypted persistence backend in Core,
@@ -17,13 +23,19 @@ from the same source revision.
 - NIT Session Agent with Unix Domain Socket and Windows Named Pipe transports,
   shared unlock state, explicit lock, status, optimistic client snapshots, and
   automatic same-executable startup from the CLI.
-- CLI commands `nit -unlock <drive-path> <workspace-id>`, `nit -lock`, and
-  `nit -session-status`.
+- CLI commands `nit -unlock`, `nit -lock`, and `nit -session-status`, with
+  automatic mounted-Drive discovery and named selection when multiple Drives
+  or workspaces are available.
 - NIT Drive v1 metadata with an authenticated Drive-to-Vault identity binding,
   staged initialization, and a mandatory encrypted Vault.
 - Read-only removable-device discovery, physical-removal detection, conservative
   provisioning dry-run, exact destructive confirmation, and real exFAT format
   plans isolated for Linux and Windows.
+- Interactive `nit -drive-create`, read-only `--dry-run`, and recovery-oriented
+  `--initialize` workflows with exact device revalidation and confirmation.
+- `nit -drive-migrate` for transactional, verified copying of active and
+  archived Plain entries into an empty Vault workspace while preserving the
+  source as a backup.
 - Dedicated Vault, Session, and expanded NIT Drive documentation.
 
 ### Compatibility
@@ -59,8 +71,8 @@ from the same source revision.
 
 ### Known limitations
 
-- The safe provisioning/formatting and Drive initialization APIs are available
-  in `nit-drive`, but an end-user CLI/TUI formatting wizard is not yet exposed.
+- Drive formatting requires platform administrator privileges; automatic
+  Polkit/UAC elevation is not yet implemented.
 - CI uses fake device sources/executors and never formats real media.
 - exFAT and removable controller caches cannot provide journaled-filesystem
   durability; safe eject remains necessary.
@@ -148,7 +160,8 @@ preserving immediate capture, local ownership, and human-readable storage.
 - Initial public release of NIT System with terminal-first capture and
   human-readable local storage.
 
-[Unreleased]: https://github.com/ART3121/NIT-System/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ART3121/NIT-System/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ART3121/NIT-System/compare/v0.4.0...v0.6.0
 [0.4.0]: https://github.com/ART3121/NIT-System/compare/v0.2.0...v0.4.0
 [0.2.0]: https://github.com/ART3121/NIT-System/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ART3121/NIT-System/releases/tag/v0.1.0

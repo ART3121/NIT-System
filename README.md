@@ -155,7 +155,7 @@ Install a specific version or select another destination:
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/ART3121/NIT-System/releases/latest/download/install.sh | \
-  NIT_VERSION=0.4.0 NIT_INSTALL_DIR="$HOME/bin" sh
+  NIT_VERSION=0.6.0 NIT_INSTALL_DIR="$HOME/bin" sh
 ```
 
 Remove a release installation:
@@ -1147,8 +1147,8 @@ The binaries are written to `target/release/nit` and `target/release/nitcat`.
 Release tags must match the version in `Cargo.toml`:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 The GitHub Actions workflow validates the project, builds the supported release archive, generates a SHA-256 checksum, prepares the installer, and publishes the assets on GitHub Releases.
