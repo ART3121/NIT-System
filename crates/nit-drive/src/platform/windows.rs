@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Command};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::RemovableDevice;
+use crate::{PlannedOperation, RemovableDevice};
 
 pub(crate) struct PresenceToken {
     canonical_path: PathBuf,
@@ -59,6 +59,13 @@ struct WindowsDevice {
     read_only: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WindowsDevices {
+    Many(Vec<WindowsDevice>),
+    One(WindowsDevice),
+}
+
 pub(crate) fn discover_devices() -> Result<Vec<RemovableDevice>> {
     let output = Command::new("powershell.exe")
         .args([
@@ -79,9 +86,42 @@ pub(crate) fn discover_devices() -> Result<Vec<RemovableDevice>> {
     parse_devices(&output.stdout)
 }
 
+pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<PlannedOperation>> {
+    let disk_number = physical_drive_number(&device.id)?;
+    Ok(vec![PlannedOperation {
+        program: "powershell.exe".into(),
+        arguments: vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "& { param([int]$DiskNumber) Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm:$false; Initialize-Disk -Number $DiskNumber -PartitionStyle GPT; New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem exFAT -NewFileSystemLabel NIT_DRIVE -Confirm:$false }".into(),
+            disk_number.to_string(),
+        ],
+        destructive: true,
+    }])
+}
+
+fn physical_drive_number(id: &str) -> Result<u32> {
+    let upper = id.to_ascii_uppercase();
+    let value = upper
+        .strip_prefix(r"\\.\PHYSICALDRIVE")
+        .ok_or_else(|| anyhow::anyhow!("invalid Windows physical drive identifier"))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid Windows physical drive identifier");
+    }
+    value
+        .parse()
+        .context("invalid Windows physical drive number")
+}
+
 fn parse_devices(source: &[u8]) -> Result<Vec<RemovableDevice>> {
-    let parsed: Vec<WindowsDevice> =
+    let parsed: WindowsDevices =
         serde_json::from_slice(source).context("invalid Windows device discovery response")?;
+    let parsed = match parsed {
+        WindowsDevices::Many(devices) => devices,
+        WindowsDevices::One(device) => vec![device],
+    };
     let mut devices = parsed
         .into_iter()
         .map(|device| RemovableDevice {

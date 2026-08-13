@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
-use crate::RemovableDevice;
+use crate::{PlannedOperation, RemovableDevice};
 
 const SYS_BLOCK: &str = "/sys/class/block";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -65,6 +65,83 @@ impl PresenceToken {
 
 pub(crate) fn discover_devices() -> Result<Vec<RemovableDevice>> {
     discover_from(Path::new(SYS_BLOCK), Path::new(MOUNTINFO))
+}
+
+pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<PlannedOperation>> {
+    validate_linux_device_id(&device.id)?;
+    let mut operations = Vec::new();
+    if !device.mount_points.is_empty() {
+        operations.push(PlannedOperation {
+            program: "umount".into(),
+            arguments: device
+                .mount_points
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            destructive: false,
+        });
+    }
+    operations.extend([
+        PlannedOperation {
+            program: "wipefs".into(),
+            arguments: vec!["--all".into(), device.id.clone()],
+            destructive: true,
+        },
+        PlannedOperation {
+            program: "parted".into(),
+            arguments: vec![
+                "--script".into(),
+                device.id.clone(),
+                "mklabel".into(),
+                "gpt".into(),
+                "mkpart".into(),
+                "primary".into(),
+                "0%".into(),
+                "100%".into(),
+            ],
+            destructive: true,
+        },
+        PlannedOperation {
+            program: "mkfs.exfat".into(),
+            arguments: vec!["-n".into(), "NIT_DRIVE".into(), "<new-partition>".into()],
+            destructive: true,
+        },
+    ]);
+    Ok(operations)
+}
+
+fn validate_linux_device_id(id: &str) -> Result<()> {
+    let Some(name) = id.strip_prefix("/dev/") else {
+        bail!("invalid Linux block device identifier");
+    };
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !looks_like_whole_disk(name)
+    {
+        bail!("refusing an ambiguous Linux block device identifier");
+    }
+    Ok(())
+}
+
+fn looks_like_whole_disk(name: &str) -> bool {
+    ["sd", "vd", "xvd", "hd"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_lowercase())
+        })
+    }) || name.strip_prefix("nvme").is_some_and(|suffix| {
+        suffix
+            .split_once('n')
+            .is_some_and(|(controller, namespace)| {
+                !controller.is_empty()
+                    && !namespace.is_empty()
+                    && controller.bytes().all(|byte| byte.is_ascii_digit())
+                    && namespace.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }) || name.strip_prefix("mmcblk").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn discover_from(sys_block: &Path, mountinfo: &Path) -> Result<Vec<RemovableDevice>> {

@@ -6,9 +6,13 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::discover_devices;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::provisioning_operations;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::PresenceToken;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::discover_devices;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::provisioning_operations;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::PresenceToken;
 
@@ -29,4 +33,11 @@ impl PresenceToken {
     pub(crate) fn is_present(&self) -> bool {
         false
     }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) fn provisioning_operations(
+    _device: &crate::RemovableDevice,
+) -> anyhow::Result<Vec<crate::PlannedOperation>> {
+    anyhow::bail!("NIT Drive provisioning currently supports Windows and Linux")
 }
