@@ -2,8 +2,9 @@
 
 `nit-tui` is the interactive management interface of NIT System. It is a Rust
 library invoked by `nit`; it intentionally does not install a second executable.
-This makes the TUI one presentation of the same `Nit` application context used
-by the CLI, rather than a separate program with separate storage behavior.
+This makes the TUI one presentation of the same `NitApi` context used by the
+CLI, rather than a separate program with separate storage behavior. The provider
+can be an in-process Plain `Nit` or a Vault `SessionClient`.
 
 ## Responsibility
 
@@ -21,26 +22,29 @@ or migration. Those operations remain in Core.
 
 ## Session lifecycle
 
-1. NIT CLI discovers and opens one workspace.
-2. It passes `&Nit` to `nit_tui::run`.
+1. NIT CLI resolves the current context: unlocked Vault session first,
+   otherwise the nearest Plain workspace.
+2. It passes `&dyn NitApi` to `nit_tui::run`.
 3. The TUI loads active and archived collections through that facade.
 4. UI actions update in-memory state immediately.
-5. Persistent actions call Core under a workspace lock and refresh the relevant
-   view. If another process changed the loaded snapshot, Core refuses the stale
-   save instead of overwriting it.
+5. Persistent actions call Core under the backend-appropriate Plain/Vault lock
+   and refresh the relevant view. If another process changed the loaded
+   snapshot, Core refuses the stale save instead of overwriting it.
 6. On exit, Crossterm restores terminal state; only accepted Core mutations
    remain durable.
 
-Because the workspace is supplied by the caller, active entries, archive data,
-the tree, and the viewer cannot accidentally resolve against different
-directories during one session.
+Because the API context is supplied by the caller, active entries, archive
+data, the tree, and viewer cannot resolve against different backends during one
+session. A removed Drive makes subsequent calls fail as unavailable; the TUI
+never creates a local fallback.
 
 ## Browser and tree
 
-The tree expresses the storage-oriented organization of the selected workspace.
+The tree expresses the domain-oriented organization of the selected workspace.
 The browser expresses the currently filtered collection. Hiding the tree changes
 layout only; it does not create another data view. Selection, filters, and
-scrolling belong to the TUI and are never serialized into `.nit/`.
+scrolling belong to the TUI and are never serialized into Plain or Vault
+storage.
 
 ## Embedded Note Viewer
 
@@ -59,9 +63,11 @@ focused reader while the TUI can embed the same capability in a larger manager.
 
 ## Editing
 
-When an action requires an external editor, the TUI calls `nit-editor`. The
+When a Plain action requires an external editor, the TUI calls `nit-editor`. The
 adapter returns text; the TUI interprets the edited Note or entry and asks Core
-to save it. Editor discovery and storage writing therefore remain separate.
+to save it. External editing is disabled for Vault because this adapter creates
+a plaintext temporary file. Editor discovery and storage writing therefore
+remain separate without weakening encrypted-at-rest behavior.
 
 ## AI panel
 
@@ -85,7 +91,7 @@ returns a direct diagnostic instead of a low-level device error.
 
 `nit-tui` may depend on Core and focused adapters. Core must never depend back
 on the TUI. The TUI also must not import private repository or storage modules;
-all durable operations return through `Nit`.
+all durable operations return through `NitApi`.
 
 See [NIT Cat](nitcat.md) for the reusable viewer boundary and
 [Architecture](architecture.md) for complete module composition.

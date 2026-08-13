@@ -4,6 +4,69 @@ All notable changes to NIT System are documented here. NIT follows a coordinated
 version: the `nit` and `nitcat` executables and every workspace crate are released
 from the same source revision.
 
+## [Unreleased]
+
+### Added
+
+- NIT Vault v1 as an authenticated encrypted persistence backend in Core,
+  using Argon2id for password derivation, a random wrapped Master Key, and
+  XChaCha20-Poly1305 for immutable opaque objects and alternating roots.
+- Multiple random-ID, path-independent workspaces inside one encrypted Vault.
+- `NitApi`, shared by in-process `Nit` and the local IPC `SessionClient`, so CLI
+  and TUI use the same domain operations for Plain and Vault Storage.
+- NIT Session Agent with Unix Domain Socket and Windows Named Pipe transports,
+  shared unlock state, explicit lock, status, optimistic client snapshots, and
+  automatic same-executable startup from the CLI.
+- CLI commands `nit -unlock <drive-path> <workspace-id>`, `nit -lock`, and
+  `nit -session-status`.
+- NIT Drive v1 metadata with an authenticated Drive-to-Vault identity binding,
+  staged initialization, and a mandatory encrypted Vault.
+- Read-only removable-device discovery, physical-removal detection, conservative
+  provisioning dry-run, exact destructive confirmation, and real exFAT format
+  plans isolated for Linux and Windows.
+- Dedicated Vault, Session, and expanded NIT Drive documentation.
+
+### Compatibility
+
+- Plain `.nit/` storage remains official, readable, password-free, and unchanged.
+- Existing workspaces are never encrypted or migrated automatically.
+- Plain commands do not start the Session Agent when no Vault is selected.
+- NIT Cat Note-ID resolution remains Plain-only; arbitrary Markdown viewing is
+  unaffected.
+
+### Security and reliability
+
+- Passwords protect only the random Master Key, allowing future password rewrap
+  without re-encrypting the Vault object set.
+- Vault headers, roots, objects, nonces, versions, identifiers, and catalog data
+  are bounded and context-bound with authenticated additional data.
+- Secret/password/message buffers are zeroized where practical and are never
+  logged or persisted by Session.
+- Unix IPC validates actual effective UID, owner-only runtime/socket permissions,
+  peer credentials, stale sockets, and non-socket endpoint replacement.
+- Windows IPC compares the OS user SID associated with each peer process.
+- Linux removal detection binds to a mount generation; Windows binds to volume
+  identity. Reinsertion always requires a new password.
+- An unavailable NIT Drive is a hard error before Plain discovery; no command
+  silently creates or writes a local source of truth.
+- Provisioning rejects fixed, root/boot/system, read-only, ambiguous, absent,
+  changed, duplicate, or undersized devices. Linux discovery traces mounted
+  device-mapper/LVM dependencies to their underlying physical disks.
+- External editor actions are disabled for Vault to avoid plaintext host
+  temporary files.
+- The unused `postcard` heapless default feature was removed, eliminating the
+  unmaintained `atomic-polyfill` dependency and leaving RustSec clean.
+
+### Known limitations
+
+- The safe provisioning/formatting and Drive initialization APIs are available
+  in `nit-drive`, but an end-user CLI/TUI formatting wizard is not yet exposed.
+- CI uses fake device sources/executors and never formats real media.
+- exFAT and removable controller caches cannot provide journaled-filesystem
+  durability; safe eject remains necessary.
+- Vault alternating roots provide crash recovery but not trusted protection
+  against rollback of the entire media to an older valid snapshot.
+
 ## [0.4.0] - 2026-08-11
 
 Version 0.4 turns NIT into a modular terminal note-management system while
@@ -85,6 +148,7 @@ preserving immediate capture, local ownership, and human-readable storage.
 - Initial public release of NIT System with terminal-first capture and
   human-readable local storage.
 
+[Unreleased]: https://github.com/ART3121/NIT-System/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/ART3121/NIT-System/compare/v0.2.0...v0.4.0
 [0.2.0]: https://github.com/ART3121/NIT-System/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ART3121/NIT-System/releases/tag/v0.1.0

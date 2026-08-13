@@ -24,6 +24,11 @@ To-do, or ordinary document. It does not discover a workspace or save durable
 data. Each caller parses the returned text according to its use case and asks
 Core to persist any accepted change.
 
+This contract is used only for Plain Storage. Vault frontends report an
+explicit error instead of sending decrypted content to this plaintext temporary
+buffer. A future Vault-aware editor flow must avoid persistent host plaintext;
+the current adapter is intentionally not a shortcut around that requirement.
+
 ## Why it is separate
 
 Keeping process discovery outside Core prevents editor preferences and terminal

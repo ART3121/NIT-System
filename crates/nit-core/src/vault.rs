@@ -1,7 +1,7 @@
 //! Versioned, authenticated storage primitives for NIT Vault.
 //!
-//! This module deliberately has no knowledge of NIT domain types. Phase 2 can
-//! serialize the existing repository state into the committed payload while
+//! This module deliberately has no knowledge of NIT domain types. The Vault
+//! repository serializes the existing domain state into committed payloads,
 //! keeping encryption confined to persistence.
 
 use std::{
@@ -69,8 +69,8 @@ impl VaultObjectId {
 /// An unlocked Vault backed by a normal directory.
 ///
 /// The decrypted Master Key is zeroized when this value is dropped. It is not
-/// cloneable or debug-printable. A later phase will move key ownership to the
-/// Session Agent without changing the on-disk format.
+/// cloneable or debug-printable. Normal multi-process use keeps this value
+/// inside the Session Agent without changing the on-disk format.
 pub struct Vault {
     root: PathBuf,
     vault_id: [u8; VAULT_ID_BYTES],

@@ -8,13 +8,16 @@
   <img src="https://img.shields.io/badge/Rust-2021-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust 2021">
   <img src="https://img.shields.io/badge/Ratatui-0.30-569cd6?style=flat-square" alt="Ratatui 0.30">
   <img src="https://img.shields.io/badge/Crossterm-0.29-4ec9b0?style=flat-square" alt="Crossterm 0.29">
-  <img src="https://img.shields.io/badge/Platform-Linux%20x86--64-f44747?style=flat-square&logo=linux&logoColor=white" alt="Linux x86-64">
-  <img src="https://img.shields.io/badge/Storage-Markdown-c586c0?style=flat-square&logo=markdown&logoColor=white" alt="Markdown storage">
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-f44747?style=flat-square" alt="Linux, macOS, and Windows">
+  <img src="https://img.shields.io/badge/Storage-Plain%20%7C%20Vault-c586c0?style=flat-square" alt="Plain and Vault storage">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-dcdcaa?style=flat-square" alt="MIT License"></a>
   <a href="https://github.com/ART3121/NIT-System/releases/latest"><img src="https://img.shields.io/github/v/release/ART3121/NIT-System?style=flat-square&color=dcdcaa" alt="Latest release"></a>
 </p>
 
-NIT System is a fast, local-first notes and task manager for the terminal. It combines immediate command-line capture, a keyboard-driven TUI, readable IDs, directory-scoped workspaces, and optional local AI Roadmaps.
+NIT System is a fast, local-first notes and task manager for the terminal. It
+combines immediate command-line capture, a keyboard-driven TUI, readable IDs,
+directory-scoped Plain workspaces, path-independent encrypted Vault workspaces,
+and optional local AI Roadmaps.
 
 The name represents the three primary concepts:
 
@@ -24,7 +27,10 @@ The name represents the three primary concepts:
 
 **Items** are available as an additional entry type for resources and references.
 
-NIT stores its data in ordinary text files. It requires no account, database, synchronization service, or NIT background process.
+NIT supports ordinary readable `.nit/` files through Plain Storage and optional
+authenticated encryption through NIT Vault. NIT Drive keeps a Vault on removable
+media and NIT Session shares one unlock locally between processes. No account,
+cloud, synchronization service, or network server is required.
 
 ## Philosophy
 
@@ -45,8 +51,9 @@ separate maintenance project.
   universal “done” state.
 - **Workspace boundaries should follow context.** Directory scope keeps
   unrelated personal and project collections separate.
-- **The filesystem is the source of truth.** Storage remains local, readable,
-  portable, manually editable, and compatible with ordinary tools.
+- **The filesystem is the source of truth.** Plain remains readable and
+  manually editable; Vault remains local, portable, versioned, authenticated,
+  and encrypted.
 - **Optional capabilities must remain optional.** AI, the TUI, Git, and an
   external editor can improve a workflow without becoming prerequisites for
   owning or reading data.
@@ -55,8 +62,10 @@ NIT also takes deliberate guidance from the Unix philosophy. The system is
 assembled from focused parts: Core owns rules and persistence, CLI owns commands,
 TUI owns interactive state, NIT Cat owns reading, and small adapters own Ollama
 and editor integration. Components share explicit APIs instead of duplicating
-storage logic, while durable state remains visible as text rather than hidden
-behind a resident service.
+storage logic, while durable state remains in user-owned files rather than
+hidden behind a service. The Vault Session Agent retains only an unlocked key
+and application state in memory; it is never durable storage and uses no
+network.
 
 This is inspiration rather than imitation. A full-screen TUI is not forced into
 a stdin/stdout filter, and internal modules exchange typed Rust values instead
@@ -80,9 +89,14 @@ Read the complete [project philosophy](docs/philosophy.md) and
 - Search across titles, Note bodies, IDs, and Roadmaps from the CLI or TUI.
 - Grow Notes into individual Markdown documents while keeping other entries compact.
 - Wrap long content and scroll collections larger than the terminal.
-- Edit with Neovim, Vim, Vi, or Nano.
+- Edit Plain entries with Neovim, Vim, Vi, or Nano.
 - Import compatible Markdown collections.
 - Generate optional Roadmaps through a local Ollama model.
+- Store multiple path-independent workspaces in an authenticated Vault.
+- Reuse one Vault unlock across CLI, TUI, and desktop clients through local IPC.
+- Invalidate a Vault session when its NIT Drive is physically removed.
+- Discover and conservatively provision removable devices on Linux and Windows
+  through the `nit-drive` Rust API.
 - Run from standalone release binaries; Rust is required only when building from source.
 
 ## Contents
@@ -91,6 +105,7 @@ Read the complete [project philosophy](docs/philosophy.md) and
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
 - [Workspaces](#workspaces)
+- [Vault, Session, and NIT Drive](#vault-session-and-nit-drive)
 - [Fast capture](#fast-capture)
 - [Command reference](#command-reference)
 - [Terminal interface](#terminal-interface)
@@ -186,10 +201,15 @@ regressions are detected, but platform-specific release archives are not yet
 published for macOS or Windows. Terminal behavior still depends on a Crossterm-
 compatible interactive terminal.
 
+Plain Storage and the terminal products remain portable across those CI
+platforms. NIT Drive device discovery, removal detection, and provisioning are
+implemented specifically for Linux and Windows; other operating systems return
+an explicit unsupported error for those media operations.
+
 ### Shell completion
 
 NIT provides completions for Bash, Zsh, and Fish. They cover commands, capture
-codes, filters, files, and workspace IDs. `nitcat` suggests only Note IDs while
+codes, filters, paths, and entry IDs. `nitcat` suggests only Note IDs while
 `nit` suggests every entry ID accepted by its commands.
 
 The release installer installs completion files automatically. Set
@@ -210,8 +230,9 @@ nit -completions fish | source
 nitcat -completions fish | source
 ```
 
-Generated completion scripts do not require a workspace. Dynamic ID
-suggestions use the nearest workspace when one is available.
+Generated completion scripts do not require a workspace. Dynamic ID suggestions
+follow the active Vault session when unlocked; otherwise they use the nearest
+Plain workspace. `nitcat` Note-ID completion remains Plain-only.
 
 ## Quick start
 
@@ -332,7 +353,8 @@ Editing, archiving, and restoring preserve the ID. Deleted numbers are not reuse
 
 ## Workspaces
 
-A `.nit/` directory is the official boundary of a NIT workspace. It keeps one collection independent from collections stored in other directory trees.
+A `.nit/` directory is the official boundary of a Plain NIT workspace. Vault
+workspaces instead use stable random identities inside one encrypted catalog.
 
 ### Hierarchical discovery
 
@@ -385,6 +407,62 @@ nit -init --tracked
 ```
 
 Tracked mode allows `.nit/` to remain available for version control. If `.nit/` already appears to be ignored, NIT reports a warning without modifying the file. Git integration is optional; NIT does not implement synchronization.
+
+## Vault, Session, and NIT Drive
+
+Plain Storage remains the default behavior described above. Vault Storage is an
+additive encrypted backend: existing `.nit/` workspaces are not encrypted,
+migrated, or password-protected automatically.
+
+```text
+Local workspace ──> Plain .nit/ (current default)
+NIT Drive       ──> mandatory encrypted Vault
+```
+
+A Vault can contain multiple independent workspaces. Each uses a random stable
+32-character workspace ID rather than a host path. The password derives a Key
+Encryption Key with Argon2id, unwraps a random Master Key, and that Master Key
+protects authenticated objects with XChaCha20-Poly1305. Entry IDs and domain
+behavior remain exactly the same.
+
+Unlock a mounted NIT Drive:
+
+```bash
+nit -unlock /media/user/NIT_DRIVE 0123456789abcdef0123456789abcdef
+```
+
+On Windows:
+
+```powershell
+nit -unlock E:\ 0123456789abcdef0123456789abcdef
+```
+
+The command prompts for the password and starts/reuses a local Session Agent.
+Subsequent CLI and TUI operations use that Vault without asking again:
+
+```bash
+nit Portable architecture notes -n
+nit -ls
+nit -tui
+nit -session-status
+```
+
+Destroy the session manually:
+
+```bash
+nit -lock
+```
+
+Removing the device also destroys the session. Reinserting it—even at the same
+mount path or drive letter—requires a new password. While the Drive is absent,
+commands fail explicitly and never fall back to a nearby `.nit/`.
+
+The `nit-drive` Rust crate implements read-only discovery, conservative dry-run,
+validated formatting plans for Linux/Windows, and authenticated Drive/Vault
+initialization. A public formatting wizard is not yet exposed in the CLI or TUI;
+no real device is formatted automatically or during tests. See the complete
+[NIT Drive guide](docs/NIT_DRIVE.md), [Vault format](docs/vault.md), and
+[Session lifecycle](docs/session.md).
 
 ## Fast capture
 
@@ -439,8 +517,18 @@ Use `nit -ls` and `nit -show` to invoke those operations.
 | `nit -migrate` | Migrate legacy `.notes` storage explicitly |
 | `nit -assign-ids` | Assign IDs to imported or legacy entries that lack them |
 | `nit -migrate-timeless` | Convert legacy timed Note and Item IDs safely |
+| `nit -unlock <drive-path> <workspace-id>` | Unlock a NIT Drive for shared CLI/TUI use |
+| `nit -session-status` | Show locked, unlocked, unavailable, or absent Agent state |
+| `nit -lock` | Destroy the active Vault session and discard its key |
 
 Initialization never overwrites an existing workspace file.
+
+For Vault, `-root` and `-path` fail intentionally because a Vault workspace is
+identified independently of host paths and its storage objects are opaque.
+`-status` remains available and prints the Vault/workspace identity and counts.
+Plain ID-maintenance commands refuse an active or unavailable Drive context.
+Explicit `-init` and legacy `-migrate` always target the current local directory
+and are not implicit fallbacks.
 
 ### Entry commands
 
@@ -449,7 +537,7 @@ Initialization never overwrites an existing workspace file.
 | `nit -ls [code] [--archived]` | List entries; Notes show only their IDs and titles |
 | `nit -search <text> [code] [--archived\|--all]` | Search titles, Note bodies, IDs, and Roadmaps |
 | `nit -show <ID or text> [--archived]` | Display one matching entry |
-| `nit -edit <ID or text> [--archived]` | Edit one matching entry |
+| `nit -edit <ID or text> [--archived]` | Edit one matching Plain entry; disabled for Vault |
 | `nit -archive <ID or text>` | Move an active entry to the archive |
 | `nit -import <path>` | Import a compatible notes file |
 | `nit -ai-roadmap <ID>` | Generate and review a local AI Roadmap |
@@ -525,8 +613,8 @@ Press `Tab` to move focus between the navigator and Entries. Press `t` to hide o
 
 | Key | Action |
 |---|---|
-| `c` | Create an entry through the external editor using the active filters |
-| `e` | Edit the selected entry through the external editor |
+| `c` | Create an entry through the external editor using the active filters (Plain only) |
+| `e` | Edit the selected entry through the external editor (Plain only) |
 | `a` | Archive the selected active entry |
 | `u` | Restore the selected archived entry and return to the active view |
 | `dd` | Permanently delete the selected entry |
@@ -553,7 +641,10 @@ Open a Note without entering the browser first:
 nitcat N-0001
 ```
 
-NIT Cat searches both active and archived Notes and reuses the same Markdown engine. It is a focused reader without the tree or AI panel; use `e` to edit a Note or `Esc` to return to the terminal.
+NIT Cat searches active and archived Notes in the nearest Plain workspace and
+reuses the same Markdown engine. It does not connect to an unlocked Vault
+session. It is a focused reader without the tree or AI panel; use `e` to edit a
+Plain Note or `Esc` to return to the terminal.
 
 | Key | Action |
 |---|---|
@@ -624,7 +715,10 @@ nitcat docs/architecture.md
 nitcat N-0001
 ```
 
-An argument recognized as an ID is resolved as a Note first. Prefix an ID-shaped filename with `./` to force path interpretation. Ordinary files are read-only; Notes opened by ID can be edited with `e` using the standard editor fallback.
+An argument recognized as an ID is resolved as a Plain Note first. Prefix an
+ID-shaped filename with `./` to force path interpretation. Ordinary files are
+read-only; Plain Notes opened by ID can be edited with `e` using the standard
+editor fallback. Vault Notes are viewed through the TUI.
 
 | Key | Action |
 |---|---|
@@ -644,7 +738,9 @@ NIT Cat does not expose the navigator tree, archive operations, or AI. Those man
 
 AI support is optional. Standard capture, search, editing, workspace discovery, and storage never require Ollama.
 
-NIT can ask a local Ollama model to transform an active entry into a short, ordered Roadmap. Generated steps remain attached to the original entry as readable Markdown.
+NIT can ask a local Ollama model to transform an active entry into a short,
+ordered Roadmap. Accepted steps remain attached to the original entry as
+readable Markdown in Plain Storage or authenticated ciphertext in Vault.
 
 ### Requirements
 
@@ -705,6 +801,14 @@ scripts/benchmark-ai.sh
 The benchmark requires `curl`, `jq`, a running Ollama endpoint, and the configured model. It measures cold and warm requests with fixed representative inputs; benchmark results vary by environment and should be interpreted comparatively rather than as universal performance targets.
 
 ## Storage format
+
+NIT has two official persistence modes. Plain is the established readable
+format below. Vault is the versioned authenticated format documented in
+[docs/vault.md](docs/vault.md); it stores no domain filenames or plaintext
+entry metadata. NIT Drive wraps a Vault under `.nit-drive/` as documented in
+[docs/NIT_DRIVE.md](docs/NIT_DRIVE.md).
+
+### Plain Storage
 
 Version 0.3 separates durable Notes from quick inline entries while keeping every file local and human-readable:
 
@@ -776,7 +880,9 @@ LT 1
 
 NIT reconciles sequence counters with IDs in both active and archived collections before allocating a new ID. Do not lower these values manually; they also prevent deleted numbers from being reused.
 
-The current format does not include timestamps, tags, relations, due dates, authorship, commit metadata, synchronization state, trash, or a persistent configuration file.
+The Plain format does not include timestamps, tags, relations, due dates,
+authorship, commit metadata, synchronization state, trash, or a persistent
+configuration file.
 
 ### Archiving and deletion
 
@@ -876,7 +982,7 @@ Entries without IDs receive new classification IDs. Unique current IDs are prese
 
 ### Manual editing
 
-The typed collection files can be edited with any text editor when the expected structure is preserved:
+Plain typed collection files can be edited with any text editor when the expected structure is preserved:
 
 - Items belong under `## Timeless`;
 - Ideas and To-dos belong under a recognized horizon;
@@ -895,6 +1001,10 @@ The parser accepts exact structural headings and treats entry text literally.
 
 Content outside recognized sections may be omitted during the next canonical rewrite. Keep a backup before experimenting with custom layouts. Press `r` in the TUI to reload files changed externally.
 
+Vault ciphertext must never be edited manually or renamed into domain-looking
+files. External editor actions are disabled for Vault to avoid writing decrypted
+content to a host temporary file.
+
 ## Architecture
 
 NIT System is a Cargo Workspace whose products share one coordinated version.
@@ -905,6 +1015,9 @@ feature in one executable module:
 nit binary
 └── nit-cli
     ├── nit-core
+    ├── nit-session
+    │   ├── nit-core
+    │   └── nit-drive
     ├── nit-tui
     │   ├── nit-core
     │   ├── nitcat       # shared Markdown engine and ViewerState
@@ -929,7 +1042,12 @@ The dependency direction protects the domain:
   migrations, and mutations. It contains no terminal UI, Markdown renderer,
   Ollama client, or editor selection.
 - **NIT CLI** translates arguments into Core operations and coordinates TUI,
-  AI, and Editor features. It does not write storage directly.
+  Session, AI, and Editor features. It does not write storage directly.
+- **NIT Session** owns the same-user local IPC endpoint and an unlocked Vault
+  in memory. It does not own durable entries or expose a network service.
+- **NIT Drive** owns removable discovery, conservative provisioning, Drive
+  identity, Vault initialization, and removal tokens. It does not own domain
+  rules or cryptographic primitives.
 - **NIT TUI** owns ephemeral interface state and returns every durable action to
   Core. It embeds NIT Cat's renderer instead of maintaining a parallel viewer.
 - **NIT Cat** reads ordinary Markdown independently and consults Core only when
@@ -939,15 +1057,17 @@ The dependency direction protects the domain:
 - **NIT Editor** delegates editing to `nvim`, `vim`, `vi`, or `nano` and returns
   text. It knows nothing about workspaces or domain objects.
 
-For example, a capture travels from shell arguments through CLI parsing, Core
+For Plain, a capture travels from shell arguments through CLI parsing, Core
 workspace discovery and validation, ID allocation, repository serialization,
-and finally into `.nit/`. An AI Roadmap travels in the opposite trust direction:
+and finally into `.nit/`. For Vault, the same domain request crosses authenticated
+local IPC to the Agent and becomes an encrypted object commit. An AI Roadmap
+travels in the opposite trust direction:
 Core supplies one Entry, AI returns an untrusted proposal, the user reviews it,
 and only Core may make it durable.
 
 This boundary structure is the practical Unix parallel in NIT: focused tools,
-visible text, explicit composition, no mandatory daemon, and one authoritative
-owner for each responsibility. See the full [architecture document](docs/architecture.md)
+explicit composition, no account or network daemon, and one authoritative owner
+for each responsibility. See the full [architecture document](docs/architecture.md)
 for dependency rules, runtime flows, state ownership, and safety boundaries.
 
 ## Detailed documentation
@@ -959,6 +1079,9 @@ The [documentation index](docs/README.md) provides a recommended reading order.
 | [Philosophy](docs/philosophy.md) | Human-first design, local-first guarantees, Unix parallels, and intentional tradeoffs |
 | [Architecture](docs/architecture.md) | Dependency graph, runtime composition, state ownership, and safety boundaries |
 | [NIT Core](docs/core.md) | Domain API, internal layers, persistence contract, and dependency rule |
+| [Vault](docs/vault.md) | Format v1, cryptography, authenticated commits, integrity, and limitations |
+| [Session Agent](docs/session.md) | IPC security, key lifetime, lock, removal, and no-fallback behavior |
+| [NIT Drive](docs/NIT_DRIVE.md) | Device discovery, provisioning safety, format, initialization, and removal |
 | [NIT CLI](docs/cli.md) | Argument dispatch, output, shell composition, and completion |
 | [NIT TUI](docs/tui.md) | Session state, browser/viewer integration, AI presentation, and terminal ownership |
 | [NIT Cat](docs/nitcat.md) | Standalone Markdown reading, Note resolution, renderer reuse, and completion |
@@ -974,8 +1097,10 @@ Run the required validation suite:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked
+cargo audit
 cargo build --workspace --locked
 ```
 
@@ -1021,13 +1146,14 @@ Release installations normally use `~/.local/bin`; Cargo installations normally 
 
 ### No workspace is found
 
-Return to the intended root and initialize explicitly:
+For Plain, return to the intended root and initialize explicitly:
 
 ```bash
 nit -init
 ```
 
-NIT never creates storage during capture, listing, or TUI startup.
+NIT never creates storage during capture, listing, or TUI startup. For Vault,
+mount the Drive and use `nit -unlock <drive-path> <workspace-id>`.
 
 ### Entries do not appear
 
@@ -1039,7 +1165,38 @@ nit -path
 nit -status
 ```
 
-The nearest `.nit/` directory wins.
+When no Vault session is unlocked, the nearest `.nit/` directory wins. While a
+Vault session is unlocked, it has priority over Plain discovery.
+
+### The NIT Drive is unavailable
+
+Inspect the session:
+
+```bash
+nit -session-status
+```
+
+Reconnect and mount the same Drive, then unlock it again:
+
+```bash
+nit -unlock /media/user/NIT_DRIVE <workspace-id>
+```
+
+Reinsertion never reuses the previous key. NIT intentionally refuses a local
+`.nit/` fallback while the old Drive session is `Unavailable`.
+
+### Vault unlock fails
+
+Confirm that the supplied path is the mounted root containing `.nit-drive/`,
+not the internal `.nit-drive/vault/` directory. Then verify the password and
+workspace ID. Incorrect passwords, changed Drive headers, mismatched bindings,
+corrupt authenticated records, and unsupported versions all fail closed.
+
+### `-edit` is rejected for a Vault entry
+
+This is expected. The external editor adapter writes a plaintext temporary file,
+so it is disabled for Vault Storage. Use the in-application operations that do
+not export decrypted content to host storage.
 
 ### A query is ambiguous
 

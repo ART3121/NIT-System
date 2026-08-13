@@ -1,4 +1,5 @@
-//! Read-only device discovery and conservative NIT Drive lifecycle.
+//! Conservative NIT Drive lifecycle: read-only discovery, removal detection,
+//! destructive provisioning gates, and authenticated Drive initialization.
 
 use std::{path::PathBuf, process::Command};
 

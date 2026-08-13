@@ -139,7 +139,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
                 vault: PathBuf::from(vault),
                 workspace: workspace.parse()?,
             }),
-            _ => bail!("usage: nit -unlock <vault-path> <workspace-id>"),
+            _ => bail!("usage: nit -unlock <drive-path> <workspace-id>"),
         },
         "-lock" => no_arguments(remaining, Action::Lock, "nit -lock"),
         "-session-status" => no_arguments(remaining, Action::SessionStatus, "nit -session-status"),

@@ -1,3 +1,9 @@
+//! Shared NIT domain and persistence facade.
+//!
+//! `Nit` exposes the same domain behavior over readable Plain `.nit/` storage
+//! and authenticated encrypted Vault storage. Frontends use `NitApi` and do not
+//! depend on repository details.
+
 mod commands;
 mod fsutil;
 mod ids;
@@ -38,8 +44,9 @@ pub struct Status {
     pub archived_entries: usize,
 }
 
-/// Shared domain API implemented by an in-process `Nit` and by the desktop
-/// Session client. Frontends depend on this surface instead of storage details.
+/// Shared domain API implemented by an in-process `Nit` and the local
+/// `nit-session` client. Frontends depend on this surface instead of storage
+/// details.
 pub trait NitApi {
     fn allows_external_editor(&self) -> bool;
     fn load(&self, view: View) -> Result<Notes>;

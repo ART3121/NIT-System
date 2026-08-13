@@ -1,106 +1,113 @@
 # NIT CLI
 
-NIT CLI is the immediate and scriptable interface exposed by the `nit`
-executable. The executable itself is a thin root-package entrypoint; argument
-parsing and dispatch live in the `nit-cli` library.
+NIT CLI is the immediate and scriptable interface exposed by `nit`. Argument
+parsing and dispatch live in `nit-cli`; durable domain operations always return
+through `NitApi`.
+
+## Capture
 
 ```bash
 nit Capture this thought -n
-nit -ls -n
-nit -search parser --all
-nit -show N-0001
+nit Fix transaction recovery -st
+nit Explore portable storage -li
 ```
 
-## Responsibility
+Supported codes are `-si`, `-mi`, `-li`, `-st`, `-mt`, `-lt`, `-n`, and `-x`.
+Operation names begin with `-`, so ordinary words remain capture text.
 
-The CLI owns:
+## Workspace selection
 
-- recognition of commands, capture text, options, and classification codes;
-- stdout/stderr behavior intended for terminal and script use;
-- interactive confirmation for destructive or optional actions;
-- dispatch to Core, TUI, AI, and Editor capabilities;
-- generation of Bash, Zsh, and Fish completion definitions.
+For domain actions, the CLI checks the local Session Agent first:
 
-It does not parse workspace storage, allocate IDs, validate persisted layouts,
-render the full-screen interface, or communicate with Ollama directly.
+1. `Unlocked` — use the Vault workspace through IPC;
+2. `Unavailable` — fail and require reconnect plus unlock;
+3. `Locked` or no agent — discover the nearest Plain `.nit/`.
 
-## Dispatch model
+This ordering is a safety boundary. A removed NIT Drive never causes the CLI to
+save into a nearby Plain workspace. Explicit Plain initialization and legacy
+migration remain separate administrative operations.
 
-The CLI separates actions that do not need a workspace from those that do:
-
-- help, version, and completion generation run anywhere;
-- initialization and legacy migration operate on an explicit directory;
-- capture, list, search, edit, archive, status, and AI actions discover the
-  nearest workspace once and reuse the resulting `Nit` context;
-- no arguments dispatch to `nit_tui::run(&Nit)` instead of starting another
-  process.
-
-This keeps workspace selection consistent across one operation. Submodules do
-not repeatedly rediscover paths behind the caller's back.
-
-## Capture and operations
-
-Capture remains natural-language-first:
+## Vault session commands
 
 ```bash
-nit Review architecture boundaries -n
-nit Fix parser validation -st
+nit -unlock <drive-path> <workspace-id>
+nit -session-status
+nit -lock
 ```
 
-Only operation names occupy the leading command position and begin with `-`.
-Words such as `list`, `show`, and `archive` remain valid capture text.
+`-unlock` expects the mounted NIT Drive root, not its internal Vault directory.
+The CLI starts the Session Agent on demand, prompts without echoing the password,
+opens the Drive, authenticates its Vault binding, and selects the supplied
+32-character workspace ID.
 
-`nit -ls` preserves the categorized listing for every entry type. Notes are
-condensed to their ID and title so an ID can be copied directly into
-`nitcat N-0001`; Note bodies are not printed by the listing command.
+After unlock, normal commands and `nit -tui` reuse the same session:
+
+```bash
+nit A portable note -n
+nit -ls
+nit -search portable
+nit -status
+nit -tui
+```
+
+`nit -status` identifies a Vault workspace without exposing a host storage
+path. `nit -root` and `nit -path` fail for Vault because paths are not the
+workspace identity and object names are intentionally opaque.
+
+`nit -lock` discards the active `Nit` and Master Key. If no Agent is running,
+it still reports a locked state. `nit -session-status` reports:
+
+- Agent not running;
+- Vault locked;
+- Vault unlocked, including Vault/workspace identity;
+- Drive unavailable and requiring a new unlock.
+
+## Command reference
+
+| Command | Purpose |
+|---|---|
+| `nit` / `nit -tui` | Open the TUI for the selected Plain/Vault context |
+| `nit <text> <code>` | Create an entry |
+| `nit -ls [code] [--archived]` | List entries |
+| `nit -search <query> [code] [--archived\|--all]` | Search entries |
+| `nit -show <query> [--archived]` | Display one entry |
+| `nit -edit <query> [--archived]` | Edit one Plain entry; disabled for Vault |
+| `nit -archive <query>` | Archive an entry |
+| `nit -import <path>` | Import a compatible collection |
+| `nit -status` | Show selected context and counts |
+| `nit -root` / `nit -path` | Print Plain paths; unavailable for Vault |
+| `nit -init [--private\|--tracked]` | Explicitly create Plain Storage |
+| `nit -migrate` | Explicitly migrate legacy Plain storage |
+| `nit -assign-ids` | Plain-only ID maintenance |
+| `nit -migrate-timeless` | Plain-only legacy ID migration |
+| `nit -unlock <drive> <workspace-id>` | Unlock/reuse a NIT Drive session |
+| `nit -lock` | Destroy the active Vault session |
+| `nit -session-status` | Inspect session state |
+| `nit -ai-roadmap <ID>` | Generate and review a local Roadmap |
+| `nit -completions <bash\|zsh\|fish>` | Generate completion definitions |
+
+Plain ID-maintenance (`-assign-ids` and `-migrate-timeless`) refuses to run
+while a Vault session is active or an active Drive is unavailable. Explicit
+`-init` and legacy `-migrate` always target the current local directory; they are
+deliberate administrative operations, not a fallback selected for a failed
+Drive action.
+
+## Session Agent startup
+
+The same `nit` executable has a hidden internal mode used to host the Agent.
+Users should not invoke it directly. The CLI starts it with detached standard
+streams, waits for its local endpoint, and then sends the unlock request. The
+separate `nit-session-agent` binary exists for integration/development, but it
+does not represent a second NIT product or database.
 
 ## Output and composition
 
-Commands such as `nit -root` and `nit -path` print only the requested path so
-shell scripts can consume it. Normal results go to stdout and failures go to
-stderr. The CLI favors explicit exit failure over silently selecting an
-ambiguous entry.
+Normal output goes to stdout; errors use a failing exit status. Broken pipes are
+treated normally. NIT favors visible text and explicit errors, but it does not
+promise a stable JSON schema for all commands.
 
-NIT is not yet a complete text-filter language: not every command accepts stdin
-or emits a stable machine schema. Its Unix-oriented contract is narrower and
-deliberate—small commands, visible text output, meaningful exit status, and
-durable files that other tools can inspect.
+Shell completion remains available for Bash, Zsh, and Fish. Static completion
+covers session commands; dynamic entry-ID completion follows the currently
+selected context through the same CLI dispatch rules.
 
-## Integration with other modules
-
-| Operation | Modules involved |
-|---|---|
-| Capture or archive | CLI → Core |
-| `nit` / `nit -tui` | CLI → TUI → Core |
-| `nit -edit` | CLI → Editor → Core |
-| `nit -ai-roadmap` | CLI → Core → AI → user confirmation → Core |
-| `nit -ls` | CLI → Core → canonical text renderer |
-| Completion IDs | shell definition → hidden CLI query → Core |
-
-The CLI is an orchestrator. Durable mutations still belong to Core, and optional
-adapters cannot write storage directly.
-
-## Shell completion
-
-Generate completion definitions with:
-
-```bash
-nit -completions bash
-nit -completions zsh
-nit -completions fish
-```
-
-Static completion includes commands, capture codes, filters, and shell names.
-Contextual completion queries active and archived IDs from the nearest
-workspace only when a command accepts an entry. The release installer places
-definitions in the normal user directories; direct generation also supports a
-Cargo installation or one shell session.
-
-## Relationship to the TUI and NIT Cat
-
-The `nit` command remains responsible for managing a workspace. With no
-arguments it embeds the TUI as a library. Long-form reading is intentionally
-available through the separate `nitcat` executable. The removed `nit -v`
-command is not retained as a second viewer route.
-
-See [Architecture](architecture.md) for end-to-end command flows.
+See [Session Agent](session.md) and [Architecture](architecture.md).

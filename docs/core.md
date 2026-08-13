@@ -1,119 +1,116 @@
 # NIT Core
 
-`nit-core` is the domain and persistence foundation shared by every NIT System
-interface. It is a Rust library, not an executable, HTTP API, daemon, database,
-or background process.
+`nit-core` is the domain and persistence foundation shared by NIT interfaces.
+It is a Rust library, not an executable, network service, UI, or device manager.
 
-## Why Core exists
+## Public application boundary
 
-Without Core, the CLI, TUI, and NIT Cat could each interpret IDs, paths, and
-storage differently. Core gives every frontend one authoritative definition of
-a workspace and one validated route to durable data.
-
-Its public `Nit` facade is the system's internal application API:
+The `Nit` facade implements `NitApi`, the interface consumed by CLI and TUI.
+`SessionClient` also implements `NitApi`, so a frontend can use the same domain
+operations against an in-process Plain workspace or an unlocked remote Vault
+session.
 
 ```rust
-let nit = nit_core::Nit::discover()?;
-let active = nit.load(nit_core::View::Active)?;
+let nit = nit_core::Nit::discover()?; // nearest Plain .nit/
 let id = nit.create(nit_core::Kind::Note, None, "Architecture".into())?;
 ```
 
-The API is public between workspace crates in version 0.4, but it is not yet
-published to crates.io and does not carry an external stability guarantee.
+For Vault Storage, callers open an authenticated `Vault`, select a stable
+`VaultWorkspaceId`, and construct `Nit::open_vault(...)`. Normal desktop and CLI
+flows keep this value inside the Session Agent instead of copying its Master
+Key into every process.
 
-## Responsibilities
+## Domain invariants
 
-Core owns:
+Core owns exactly one domain model for both persistence modes:
 
-- discovery and initialization of directory-scoped `.nit/` workspaces;
-- workspace paths and nearest-ancestor selection;
-- the `Entry`, `EntryId`, `Kind`, `Horizon`, `Roadmap`, and `View` models;
-- classification validation and human-readable ID allocation;
-- active and archived collection loading;
-- parsing and canonical serialization;
-- search across titles, bodies, IDs, and Roadmaps;
-- create, archive, import, migration, and Roadmap attachment operations;
-- layout, uniqueness, and cross-file integrity validation;
-- preservation rules for legacy migration and backups.
+- `Entry`, `EntryId`, `Kind`, `Horizon`, `Roadmap`, `Notes`, and `View`;
+- horizons only for Ideas and To-dos;
+- classification-specific, collision-resistant human-readable sequences;
+- search, create, archive, import, save, and Roadmap attachment;
+- active/archive consistency and stale-snapshot rejection;
+- validation before every durable mutation.
 
-Core does not own terminal rendering, keybindings, command-line syntax, Ollama
-requests, confirmation prompts, or editor process selection.
+There are no `EncryptedEntry`, `PortableEntry`, or Drive-specific domain types.
+Encryption and media placement remain persistence concerns.
+
+## Storage model
+
+```text
+Repository
+├── PlainRepository  ──> Workspace ──> .nit/
+└── VaultRepository  ──> Vault ─────> authenticated ciphertext
+```
+
+The repository selects a small backend enum and shares the surrounding domain
+operations. Create, search, archive, ID allocation, import, and Roadmap rules
+are not duplicated by backend.
+
+### Plain Storage
+
+Plain is the existing official storage mode. `Workspace::discover` walks from
+the current directory toward the filesystem root and selects the nearest valid
+`.nit/`. It never initializes implicitly. Notes remain individual Markdown
+documents and other entry classes remain compact text collections.
+
+Plain mutations reuse the established guarantees:
+
+- shared/exclusive workspace locking;
+- bounded reads and symlink rejection for administrative paths;
+- private, same-filesystem temporary files and atomic replacement;
+- file and Unix parent-directory synchronization;
+- a `.nit/.transaction/` write-ahead snapshot;
+- recovery after interrupted multi-file changes;
+- post-write validation and stale frontend detection.
+
+Existing Plain workspaces are not encrypted or migrated automatically, never
+require a password, and do not require the Session Agent.
+
+### Vault Storage
+
+Vault stores an authenticated, versioned catalog containing one or more
+workspaces. Each workspace has a random 128-bit path-independent identity,
+name, active/archive collections, and ID sequences. The same repository state
+is serialized with `postcard` and committed as an encrypted Vault object.
+
+Vault uses an exclusive file lock around read/modify/write transactions,
+immutable objects, and alternating authenticated roots. Plaintext catalog
+buffers and temporary key material are zeroized where practical. It never
+extracts a `.nit/` tree to a temporary host directory.
+
+See [Vault format](vault.md) for the exact cryptographic and commit contract.
 
 ## Internal modules
 
 | Module | Purpose |
 |---|---|
 | `model.rs` | Domain values and classification rules |
-| `workspace.rs` | Workspace discovery, creation, paths, privacy helpers, and legacy migration |
-| `repository.rs` | Layout-aware persistence, global validation, search, and storage-layout migration |
-| `storage.rs` | Text parsing and serialization for compact collection files |
-| `ids.rs` | Per-class counters and collision prevention |
-| `commands.rs` | Domain operations composed from repository, storage, and IDs |
-| `fsutil.rs` | Workspace locks, bounded reads, private temporary files, and durable atomic replacement |
-| `lib.rs` | The public `Nit` facade and exported types |
+| `workspace.rs` | Plain workspace discovery, initialization, and migration |
+| `repository.rs` | Shared operations and the small Plain/Vault backend boundary |
+| `storage.rs` | Plain text parsing and canonical serialization |
+| `ids.rs` | Per-class sequences and collision prevention |
+| `commands.rs` | Domain use cases |
+| `fsutil.rs` | Plain locks, journal, bounded reads, and atomic replacement |
+| `vault.rs` | Vault v1 cryptography, records, locking, and commits |
+| `vault_repository.rs` | Encrypted catalog and stable Vault workspaces |
+| `lib.rs` | `Nit`, `NitApi`, and exported domain surface |
 
-Only the facade and selected domain types cross the crate boundary. Repository,
-storage, and ID-sequence implementations stay private so callers cannot bypass
-invariants with a low-level write.
+## Frontend rules
 
-## Workspace lifecycle
+- CLI and TUI call `NitApi`; they do not parse or write storage directly.
+- Session owns unlocked Vault state but delegates domain work to `Nit`.
+- Drive discovers and prepares media but does not define domain rules.
+- AI returns a validated `Roadmap`; only Core can attach it.
+- External editor operations are permitted for Plain Storage only. Vault
+  editing through a plaintext host temporary file is deliberately rejected.
+- NIT Cat currently discovers Plain workspaces when resolving Note IDs; ordinary
+  Markdown file viewing remains storage-independent.
 
-`Workspace::discover` starts at the current directory and walks toward the
-filesystem root. The nearest `.nit/` directory wins. Discovery never creates a
-workspace as a side effect; initialization is an explicit command.
+## Compatibility and stability
 
-Opening a `Nit` instance validates the current layout and may perform a safe,
-known layout migration. Legacy `.notes` migration and ID migrations remain
-explicit because they have user-visible consequences.
+Plain Storage remains a supported first-class mode. Vault is additive and does
+not change existing `.nit/` data. The Rust API is currently workspace-internal
+and is not an HTTP API, plugin protocol, or crates.io stability commitment.
 
-## Persistence contract
-
-Core treats the filesystem as the durable source of truth. Notes are individual
-Markdown documents. Ideas, Items, and To-dos use compact text collections.
-Active and archived data are separate but validated together so an ID cannot
-silently exist twice.
-
-Before a collection is saved, Core validates its classifications, IDs, Roadmap
-shape, and destination layout. Interfaces receive an error rather than a
-partially interpreted success.
-
-Readers use a shared workspace lock and mutations use an exclusive lock. ID
-allocation, reload, mutation, and persistence therefore cannot race with
-another NIT process. The `Nit` facade also remembers the collection snapshot
-given to a frontend and refuses to save it after another process has changed
-the same view. Multi-view mutations validate both collections, verify the
-result after writing, and restore the previous data when an ordinary write
-failure occurs.
-
-Before a mutation, Core creates a lightweight write-ahead snapshot in
-`.nit/.transaction/`, using same-filesystem hard links when available. A later
-process automatically restores that snapshot if the previous process was
-interrupted before commit. The journal is removed only after validation and
-durability steps complete.
-
-Storage reads are bounded, replacement files are private random temporary
-files in the destination filesystem, and durable writes synchronize the file
-and parent directory on Unix. Symbolic links are rejected for administrative
-workspace paths rather than followed implicitly.
-
-## How other modules use Core
-
-- **CLI** translates arguments into `Nit` calls and formats results.
-- **TUI** loads collections through `Nit`, keeps only transient interface state,
-  and sends persistent actions back through the facade.
-- **NIT Cat** uses Core only when an argument is a Note ID; ordinary Markdown
-  files remain independent of a workspace.
-- **AI** accepts Core's `Entry` type and returns Core's `Roadmap` type, but has
-  no permission to persist it.
-- **Editor** has no Core dependency at all; its caller decides how returned text
-  maps to a domain value.
-
-## Dependency rule
-
-`nit-core` must not depend on Ratatui, Crossterm, Pulldown-Cmark, Ollama, an
-external editor, or interface-specific state. This inward dependency direction
-is the architectural rule that keeps NIT from becoming a monolith.
-
-See [Architecture](architecture.md) for complete runtime flows and
-[Philosophy](philosophy.md) for the relationship between this boundary and Unix
-design principles.
+See [Architecture](architecture.md), [Session Agent](session.md), and
+[NIT Drive](NIT_DRIVE.md) for the surrounding runtime.

@@ -2,8 +2,8 @@
 //!
 //! The agent owns the unlocked `Vault`/`Nit` values. Passwords cross IPC only
 //! during unlock, are moved immediately into `SecretString`, and are never
-//! logged or persisted. Domain operations will be added to this protocol in the
-//! CLI integration phase; the lifecycle and transport are established here.
+//! logged or persisted. The versioned protocol exposes `NitApi` domain
+//! operations while keeping Master Keys inside the same-user local agent.
 
 use std::{
     io::{Read, Write},

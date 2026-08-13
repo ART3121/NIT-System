@@ -19,6 +19,11 @@ The CLI or TUI owns user interaction around this operation. It displays
 progress, requests permission before a model pull, presents the proposal, and
 persists only after explicit acceptance.
 
+Persistence follows the selected `NitApi`: a Plain workspace stores the
+accepted Roadmap in readable Markdown, while a Vault workspace commits it as
+authenticated ciphertext through Session. AI itself cannot distinguish or
+bypass those backends.
+
 ## Runtime behavior
 
 - Ollama is contacted only through an endpoint that resolves to an IPv4 or IPv6
@@ -55,5 +60,5 @@ small input and returns a typed proposal, while Core remains authoritative. The
 project does not embed model management into storage, keep a NIT AI daemon, or
 send the whole workspace as ambient context.
 
-See [Architecture](architecture.md#ai-roadmap-generation) for the complete
+See [Architecture](architecture.md#ai-and-external-editing) for the complete
 acceptance flow.

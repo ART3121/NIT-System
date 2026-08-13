@@ -28,16 +28,24 @@ objects merely by being recorded.
 ## Local-first by construction
 
 Local-first is not an offline mode added to a remote service. NIT's source of
-truth is the `.nit/` directory on the user's filesystem. There is no account,
-database server, mandatory synchronization provider, or NIT daemon.
+truth is either the selected Plain `.nit/` directory or the selected encrypted
+Vault. There is no account, database server, cloud service, or mandatory
+synchronization provider.
 
 This gives the user several practical guarantees:
 
 - data remains available without a network connection;
-- ordinary filesystem tools can inspect, copy, diff, back up, or version it;
-- storage remains readable even if the NIT executable is unavailable;
+- ordinary filesystem tools can inspect, copy, diff, back up, or version Plain
+  Storage, and can copy or back up Vault ciphertext as an opaque unit;
+- Plain storage remains readable without NIT; Vault intentionally requires its
+  password and compatible format implementation;
 - Git can be used, but Git is not required;
-- optional integrations cannot become prerequisites for basic note access.
+- optional integrations cannot become prerequisites for Plain note access.
+
+NIT Drive keeps its Vault on removable media as the canonical source instead of
+creating a hidden host replica. Its local Session Agent exists only to share an
+unlock between same-user processes. It is ephemeral mechanism, not durable
+storage, synchronization, or a network service.
 
 ## Structure without ceremony
 
@@ -53,16 +61,16 @@ view; it is not automatically declared completed, obsolete, or successful.
 ## Relationship to the Unix philosophy
 
 NIT follows Unix ideas as engineering guidance rather than as branding. The
-parallel is strongest in responsibility, composition, textual storage, and the
-absence of hidden resident state.
+parallel is strongest in responsibility, composition, inspectable ownership,
+and the absence of hidden durable service state.
 
 | Unix-oriented idea | NIT interpretation |
 |---|---|
 | Make each program do one thing well | `nit` manages entries; `nitcat` reads Markdown and Notes; Core owns rules; adapters own external integrations. |
 | Build tools that work together | CLI, TUI, Cat, AI, and Editor compose through explicit Rust APIs and filesystem paths. Shell-visible commands expose useful stdout where appropriate. |
-| Prefer text as a universal interface | Durable data is Markdown or compact human-readable text, not an opaque database. |
+| Prefer inspectable ownership | Plain data is Markdown or compact text. When confidentiality is explicitly selected, Vault data is authenticated ciphertext with a documented versioned format. |
 | Separate mechanism from policy | Core enforces storage and identity rules; interfaces decide how users interact with those rules. |
-| Avoid needless global state | Workspaces are directory-scoped, model loading belongs to Ollama, and NIT runs no background daemon. |
+| Avoid needless global state | Plain workspaces are directory-scoped, model loading belongs to Ollama, and Vault's Agent is local, memory-only, and started only when needed. |
 | Make behavior observable | IDs, paths, workspace roots, storage files, errors, and migrations are explicit. |
 | Compose instead of duplicating | The TUI embeds NIT Cat's Markdown engine and both interfaces reuse the same Editor adapter and Core API. |
 
@@ -82,10 +90,11 @@ not release fragmentation for its own sake.
 
 ## Optional power, mandatory simplicity
 
-AI may interpret a selected entry, but capture, search, storage, editing, and
-reading never depend on AI. The external editor makes long-form changes more
-comfortable, but files remain manually editable. The TUI improves discovery,
-but the CLI remains sufficient for scripted and rapid operations.
+AI may interpret a selected entry, but capture, search, storage, and reading
+never depend on AI. The external editor makes Plain long-form changes more
+comfortable, while Plain files remain manually editable. Vault deliberately
+keeps ciphertext opaque. The TUI improves discovery, but the CLI remains
+sufficient for scripted and rapid operations.
 
 A feature belongs in NIT when it preserves these properties:
 

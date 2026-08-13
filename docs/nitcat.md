@@ -30,6 +30,11 @@ and archived Notes. The Note body and optional Roadmap are presented as one
 Markdown document. Editing with `e` is enabled because Core can safely persist
 the resolved Note.
 
+Note-ID resolution currently targets Plain `.nit/` discovery. NIT Cat does not
+connect to the Vault Session Agent. Vault Notes remain readable inside the TUI,
+which uses `NitApi` through the active session. Ordinary Markdown files remain
+independent of either backend.
+
 Recognized IDs take precedence over paths. Use `./N-0001` when a real filename
 resembles an ID. IDs belonging to Ideas, Items, or To-dos are rejected because
 NIT Cat's NIT-aware contract is specifically long-form Note reading.
@@ -53,6 +58,9 @@ edge, which allows the TUI to reuse the generic layers.
 For a normal file, NIT Cat uses neither Core persistence nor Editor. For a Note
 ID, Core supplies the source and identity. If the user presses `e`, NIT Editor
 collects the edited document and Core performs the durable save.
+
+This edit route is Plain-only. A Vault Note is never exported to NIT Editor's
+plaintext temporary buffer.
 
 NIT Cat never allocates IDs, archives entries, generates AI content, or exposes
 the workspace navigator. Those responsibilities remain with the management
@@ -81,7 +89,8 @@ nitcat -completions zsh
 nitcat -completions fish
 ```
 
-Completion combines filesystem paths with Note IDs from the nearest workspace.
+Completion combines filesystem paths with Note IDs from the nearest Plain
+workspace.
 Dynamic ID lookup is best-effort: outside a workspace, file completion still
 works and no workspace is created.
 
