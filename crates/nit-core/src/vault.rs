@@ -44,8 +44,8 @@ const OBJECT_ID_BYTES: usize = 32;
 
 const MAX_HEADER_BYTES: u64 = 4 * 1024;
 const MAX_ROOT_BYTES: u64 = 4 * 1024;
-const MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024 + 1024;
-const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_OBJECT_BYTES: u64 = 128 * 1024 * 1024 + 1024;
+const MAX_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
 
 const DEFAULT_MEMORY_COST_KIB: u32 = 64 * 1024;
 const DEFAULT_TIME_COST: u32 = 3;
@@ -293,6 +293,28 @@ impl Vault {
         validate_payload(payload)?;
         validate_vault_directory(&self.root)?;
         let _lock = VaultLock::open(&self.root, true)?;
+        self.commit_unlocked(payload)
+    }
+
+    /// Atomically transforms the latest committed payload while holding the
+    /// Vault's exclusive lock for the entire read/modify/write operation.
+    pub(crate) fn transaction<T>(
+        &self,
+        operation: impl FnOnce(Option<&[u8]>) -> Result<(Vec<u8>, T)>,
+    ) -> Result<T> {
+        validate_vault_directory(&self.root)?;
+        let _lock = VaultLock::open(&self.root, true)?;
+        let current = self
+            .read_current_root()?
+            .map(|root| self.read_object(root.object_id))
+            .transpose()?;
+        let (next, value) = operation(current.as_deref().map(Vec::as_slice))?;
+        validate_payload(&next)?;
+        self.commit_unlocked(&next)?;
+        Ok(value)
+    }
+
+    fn commit_unlocked(&self, payload: &[u8]) -> Result<VaultObjectId> {
         let current = self.read_current_root()?;
         let generation = current.as_ref().map_or(Ok(1), |root| {
             root.generation

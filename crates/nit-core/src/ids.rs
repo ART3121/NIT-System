@@ -23,6 +23,17 @@ impl Default for IdSequences {
 }
 
 impl IdSequences {
+    pub(crate) fn from_values(next: [u64; CLASSIFICATION_COUNT]) -> Result<Self> {
+        if next.contains(&0) {
+            bail!("Vault ID sequences must be greater than zero");
+        }
+        Ok(Self { next })
+    }
+
+    pub(crate) fn values(&self) -> [u64; CLASSIFICATION_COUNT] {
+        self.next
+    }
+
     pub(crate) fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());

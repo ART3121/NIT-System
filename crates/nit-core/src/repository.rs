@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{collections::HashSet, fs, path::Path, sync::Arc};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -8,8 +8,10 @@ use crate::{
         WorkspaceLock, WorkspaceTransaction, MAX_STORAGE_BYTES,
     },
     ids::IdSequences,
-    model::{Entry, EntryId, Kind, Notes, Roadmap, RoadmapStep},
+    model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap, RoadmapStep},
     storage::{load, render_notes, ACTIVE_TITLE, ARCHIVE_TITLE},
+    vault::Vault,
+    vault_repository::{VaultRepository, VaultWorkspaceId, VaultWorkspaceInfo},
     workspace::Workspace,
 };
 
@@ -27,13 +29,26 @@ impl View {
 
 #[derive(Clone)]
 pub(crate) struct Repository {
-    workspace: Workspace,
+    backend: RepositoryBackend,
+}
+
+#[derive(Clone)]
+enum RepositoryBackend {
+    Plain(Workspace),
+    Vault(VaultRepository),
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RepositoryState {
+    pub(crate) active: Notes,
+    pub(crate) archived: Notes,
+    pub(crate) sequences: IdSequences,
 }
 
 impl Repository {
     pub(crate) fn open(workspace: &Workspace) -> Result<Self> {
         let repository = Self {
-            workspace: workspace.clone(),
+            backend: RepositoryBackend::Plain(workspace.clone()),
         };
         {
             let _lock = WorkspaceLock::exclusive(&workspace.nit_dir())?;
@@ -44,16 +59,45 @@ impl Repository {
         Ok(repository)
     }
 
+    pub(crate) fn open_vault(vault: Arc<Vault>, workspace_id: VaultWorkspaceId) -> Result<Self> {
+        let repository = Self {
+            backend: RepositoryBackend::Vault(VaultRepository::open(vault, workspace_id)?),
+        };
+        let state = repository.state()?;
+        validate_state(&state)?;
+        Ok(repository)
+    }
+
+    pub(crate) fn create_vault_workspace(
+        vault: &Arc<Vault>,
+        name: impl Into<String>,
+    ) -> Result<VaultWorkspaceInfo> {
+        VaultRepository::create_workspace(vault, name)
+    }
+
+    pub(crate) fn vault_workspaces(vault: &Vault) -> Result<Vec<VaultWorkspaceInfo>> {
+        VaultRepository::list_workspaces(vault)
+    }
+
     pub(crate) fn load(&self, view: View) -> Result<Notes> {
-        let nit_dir = self.workspace.nit_dir();
+        if let RepositoryBackend::Vault(repository) = &self.backend {
+            let state = repository.read()?;
+            validate_state(&state)?;
+            return Ok(match view {
+                View::Active => state.active,
+                View::Archived => state.archived,
+            });
+        }
+        let workspace = self.plain_workspace()?;
+        let nit_dir = workspace.nit_dir();
         let lock = WorkspaceLock::shared(&nit_dir)?;
         if nit_dir.join(".transaction").exists() {
             drop(lock);
             let _lock = WorkspaceLock::exclusive(&nit_dir)?;
             recover_transaction(&nit_dir)?;
-            return load_from(&self.workspace, view);
+            return load_from(workspace, view);
         }
-        load_from(&self.workspace, view)
+        load_from(workspace, view)
     }
 
     pub(crate) fn save_if_unchanged(
@@ -62,6 +106,19 @@ impl Repository {
         expected: &Notes,
         notes: &Notes,
     ) -> Result<()> {
+        if matches!(self.backend, RepositoryBackend::Vault(_)) {
+            return self.update_state(|state| {
+                let current = match view {
+                    View::Active => &mut state.active,
+                    View::Archived => &mut state.archived,
+                };
+                if *current != *expected {
+                    bail!("workspace changed since it was loaded; reload before saving to avoid losing data");
+                }
+                *current = notes.clone();
+                Ok(())
+            });
+        }
         self.exclusive(|repository| {
             let current = repository.load_unlocked(view)?;
             if current != *expected {
@@ -80,6 +137,16 @@ impl Repository {
         active: &Notes,
         archived: &Notes,
     ) -> Result<()> {
+        if matches!(self.backend, RepositoryBackend::Vault(_)) {
+            return self.update_state(|state| {
+                if state.active != *expected_active || state.archived != *expected_archived {
+                    bail!("workspace changed since it was loaded; reload before saving to avoid losing data");
+                }
+                state.active = active.clone();
+                state.archived = archived.clone();
+                Ok(())
+            });
+        }
         self.exclusive(|repository| {
             let (current_active, current_archived) = repository.all_unlocked()?;
             if current_active != *expected_active || current_archived != *expected_archived {
@@ -92,13 +159,14 @@ impl Repository {
     }
 
     pub(crate) fn save_unlocked(&self, view: View, notes: &Notes) -> Result<()> {
+        let workspace = self.plain_workspace()?;
         validate_collection(notes)?;
         let other = self.load_unlocked(match view {
             View::Active => View::Archived,
             View::Archived => View::Active,
         })?;
         validate_global_ids([notes, &other])?;
-        save_to(&self.workspace, view, notes)?;
+        save_to(workspace, view, notes)?;
         if !semantically_equal(&self.load_unlocked(view)?, notes) {
             bail!("workspace validation failed after saving");
         }
@@ -106,7 +174,12 @@ impl Repository {
     }
 
     pub(crate) fn all(&self) -> Result<(Notes, Notes)> {
-        let nit_dir = self.workspace.nit_dir();
+        if let RepositoryBackend::Vault(repository) = &self.backend {
+            let state = repository.read()?;
+            validate_state(&state)?;
+            return Ok((state.active, state.archived));
+        }
+        let nit_dir = self.plain_workspace()?.nit_dir();
         let lock = WorkspaceLock::shared(&nit_dir)?;
         if nit_dir.join(".transaction").exists() {
             drop(lock);
@@ -125,15 +198,16 @@ impl Repository {
     }
 
     pub(crate) fn load_unlocked(&self, view: View) -> Result<Notes> {
-        load_from(&self.workspace, view)
+        load_from(self.plain_workspace()?, view)
     }
 
     pub(crate) fn save_both_unlocked(&self, active: &Notes, archived: &Notes) -> Result<()> {
         validate_collection(active)?;
         validate_collection(archived)?;
         validate_global_ids([active, archived])?;
-        save_to(&self.workspace, View::Active, active)?;
-        save_to(&self.workspace, View::Archived, archived)?;
+        let workspace = self.plain_workspace()?;
+        save_to(workspace, View::Active, active)?;
+        save_to(workspace, View::Archived, archived)?;
         let (saved_active, saved_archived) = self.all_unlocked()?;
         if !semantically_equal(&saved_active, active)
             || !semantically_equal(&saved_archived, archived)
@@ -144,7 +218,7 @@ impl Repository {
     }
 
     pub(crate) fn exclusive<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        let nit_dir = self.workspace.nit_dir();
+        let nit_dir = self.plain_workspace()?.nit_dir();
         let _lock = WorkspaceLock::exclusive(&nit_dir)?;
         recover_transaction(&nit_dir)?;
         let mut transaction = WorkspaceTransaction::begin(&nit_dir)?;
@@ -190,35 +264,194 @@ impl Repository {
         Ok(matches)
     }
 
-    pub(crate) fn workspace(&self) -> &Workspace {
-        &self.workspace
+    pub(crate) fn workspace(&self) -> Option<&Workspace> {
+        match &self.backend {
+            RepositoryBackend::Plain(workspace) => Some(workspace),
+            RepositoryBackend::Vault(_) => None,
+        }
+    }
+
+    pub(crate) fn vault_workspace(&self) -> Result<Option<VaultWorkspaceInfo>> {
+        match &self.backend {
+            RepositoryBackend::Plain(_) => Ok(None),
+            RepositoryBackend::Vault(repository) => repository.info().map(Some),
+        }
+    }
+
+    pub(crate) fn create_entry(
+        &self,
+        kind: Kind,
+        horizon: Option<Horizon>,
+        value: String,
+    ) -> Result<EntryId> {
+        self.update_state(|state| {
+            IdSequences::require_all_ids([&state.active, &state.archived])?;
+            state
+                .sequences
+                .reconcile([&state.active, &state.archived])?;
+            let id = state.sequences.allocate(horizon, kind)?;
+            crate::commands::add(&mut state.active, Some(id), kind, horizon, value);
+            Ok(id)
+        })
+    }
+
+    pub(crate) fn archive_entry(&self, query: &str) -> Result<()> {
+        self.update_state(|state| {
+            state
+                .sequences
+                .reconcile([&state.active, &state.archived])?;
+            let index = crate::commands::find_index(&state.active, query)?;
+            let entry = state.active.entries.remove(index);
+            state.archived.entries.push(entry);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn import_entries(&self, mut imported: Notes) -> Result<usize> {
+        if imported.entries.is_empty() {
+            bail!("no entries found; import files using the NIT headings and '- text' entries");
+        }
+        let imported_count = imported.entries.len();
+        self.update_state(|state| {
+            IdSequences::require_all_ids([&state.active, &state.archived])?;
+            for entry in &mut imported.entries {
+                if entry.id.is_some_and(|id| !id.is_current()) {
+                    entry.id = None;
+                }
+            }
+            state
+                .sequences
+                .reconcile([&state.active, &state.archived, &imported])?;
+            for entry in &mut imported.entries {
+                if entry.id.is_none() {
+                    entry.id = Some(state.sequences.allocate(entry.horizon, entry.kind)?);
+                }
+            }
+            state.active.entries.extend(imported.entries);
+            state
+                .sequences
+                .reconcile([&state.active, &state.archived])?;
+            Ok(())
+        })?;
+        Ok(imported_count)
+    }
+
+    pub(crate) fn roadmap_target(&self, id: EntryId) -> Result<Entry> {
+        let entry = self
+            .load(View::Active)?
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == Some(id))
+            .ok_or_else(|| anyhow!("no active entry has ID {id}"))?;
+        if entry.roadmap.is_some() {
+            bail!("entry {id} already has a Roadmap; remove it manually before generating another");
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn attach_roadmap(&self, expected: &Entry, roadmap: Roadmap) -> Result<()> {
+        let id = expected
+            .id
+            .ok_or_else(|| anyhow!("Roadmap targets require an entry ID"))?;
+        self.update_state(|state| {
+            let index = state
+                .active
+                .entries
+                .iter()
+                .position(|entry| entry.id == Some(id))
+                .ok_or_else(|| anyhow!("active entry {id} no longer exists"))?;
+            if &state.active.entries[index] != expected {
+                bail!(
+                    "entry {id} changed while its Roadmap was being generated; nothing was saved"
+                );
+            }
+            state.active.entries[index].roadmap = Some(roadmap);
+            Ok(())
+        })
+    }
+
+    fn state(&self) -> Result<RepositoryState> {
+        match &self.backend {
+            RepositoryBackend::Plain(workspace) => {
+                let (active, archived) = self.all()?;
+                let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
+                sequences.reconcile([&active, &archived])?;
+                let state = RepositoryState {
+                    active,
+                    archived,
+                    sequences,
+                };
+                validate_state(&state)?;
+                Ok(state)
+            }
+            RepositoryBackend::Vault(repository) => {
+                let state = repository.read()?;
+                validate_state(&state)?;
+                Ok(state)
+            }
+        }
+    }
+
+    fn update_state<T>(
+        &self,
+        operation: impl FnOnce(&mut RepositoryState) -> Result<T>,
+    ) -> Result<T> {
+        match &self.backend {
+            RepositoryBackend::Plain(workspace) => self.exclusive(|repository| {
+                let (active, archived) = repository.all_unlocked()?;
+                let mut state = RepositoryState {
+                    sequences: IdSequences::load(&workspace.next_ids_path())?,
+                    active,
+                    archived,
+                };
+                state
+                    .sequences
+                    .reconcile([&state.active, &state.archived])?;
+                let value = operation(&mut state)?;
+                validate_state(&state)?;
+                repository.save_both_unlocked(&state.active, &state.archived)?;
+                state.sequences.save(&workspace.next_ids_path())?;
+                Ok(value)
+            }),
+            RepositoryBackend::Vault(repository) => repository.update(|state| {
+                let value = operation(state)?;
+                validate_state(state)?;
+                Ok(value)
+            }),
+        }
+    }
+
+    fn plain_workspace(&self) -> Result<&Workspace> {
+        self.workspace()
+            .ok_or_else(|| anyhow!("operation requires Plain Storage"))
     }
 
     fn validate_layout(&self) -> Result<()> {
-        let _lock = WorkspaceLock::exclusive(&self.workspace.nit_dir())?;
-        recover_transaction(&self.workspace.nit_dir())?;
-        let nit = self.workspace.nit_dir();
+        let workspace = self.plain_workspace()?;
+        let _lock = WorkspaceLock::exclusive(&workspace.nit_dir())?;
+        recover_transaction(&workspace.nit_dir())?;
+        let nit = workspace.nit_dir();
         for directory in [
             nit.as_path(),
-            self.workspace.notes_dir(false).as_path(),
-            self.workspace.archive_path().as_path(),
-            self.workspace.notes_dir(true).as_path(),
+            workspace.notes_dir(false).as_path(),
+            workspace.archive_path().as_path(),
+            workspace.notes_dir(true).as_path(),
         ] {
             reject_symlink(directory)?;
         }
-        if !self.workspace.notes_dir(false).is_dir()
-            || !self.workspace.archive_path().is_dir()
-            || !self.workspace.notes_dir(true).is_dir()
+        if !workspace.notes_dir(false).is_dir()
+            || !workspace.archive_path().is_dir()
+            || !workspace.notes_dir(true).is_dir()
         {
             bail!("invalid NIT 0.3 workspace layout at {}", nit.display());
         }
         for path in [
-            self.workspace.ideas_path(false),
-            self.workspace.items_path(false),
-            self.workspace.todos_path(false),
-            self.workspace.ideas_path(true),
-            self.workspace.items_path(true),
-            self.workspace.todos_path(true),
+            workspace.ideas_path(false),
+            workspace.items_path(false),
+            workspace.todos_path(false),
+            workspace.ideas_path(true),
+            workspace.items_path(true),
+            workspace.todos_path(true),
         ] {
             reject_symlink(&path)?;
             if !path.is_file() {
@@ -447,6 +680,18 @@ fn validate_global_ids<'a>(collections: impl IntoIterator<Item = &'a Notes>) -> 
                 bail!("duplicate entry ID across active and archive: {id}");
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_state(state: &RepositoryState) -> Result<()> {
+    validate_collection(&state.active)?;
+    validate_collection(&state.archived)?;
+    validate_global_ids([&state.active, &state.archived])?;
+    let mut reconciled = state.sequences.clone();
+    reconciled.reconcile([&state.active, &state.archived])?;
+    if reconciled != state.sequences {
+        bail!("ID sequences are behind the entries stored in this workspace");
     }
     Ok(())
 }

@@ -1,12 +1,12 @@
-use std::{fs, path::Path};
+use std::fs;
 
 use anyhow::{bail, Context, Result};
 
 use crate::{
     fsutil::WorkspaceLock,
     ids::IdSequences,
-    model::{Entry, EntryId, Horizon, Kind, Notes, Roadmap},
-    repository::{Repository, View},
+    model::{Entry, EntryId, Horizon, Kind, Notes},
+    repository::Repository,
     storage::{load, save, ACTIVE_TITLE, ARCHIVE_TITLE},
     workspace::Workspace,
 };
@@ -101,108 +101,6 @@ pub fn find_index(notes: &Notes, query: &str) -> Result<usize> {
         [] => bail!("no entry matches '{query}'"),
         _ => bail!("'{query}' matches more than one entry; use a more specific phrase"),
     }
-}
-
-pub(crate) fn roadmap_target(workspace: &Workspace, id: EntryId) -> Result<Entry> {
-    let notes = Repository::open(workspace)?.load(View::Active)?;
-    let entry = notes
-        .entries
-        .into_iter()
-        .find(|entry| entry.id == Some(id))
-        .ok_or_else(|| anyhow::anyhow!("no active entry has ID {id}"))?;
-    if entry.roadmap.is_some() {
-        bail!("entry {id} already has a Roadmap; remove it manually before generating another");
-    }
-    Ok(entry)
-}
-
-pub(crate) fn attach_roadmap(
-    workspace: &Workspace,
-    expected: &Entry,
-    roadmap: Roadmap,
-) -> Result<()> {
-    let id = expected
-        .id
-        .ok_or_else(|| anyhow::anyhow!("Roadmap targets require an entry ID"))?;
-    let repository = Repository::open(workspace)?;
-    repository.exclusive(|repository| {
-        let mut notes = repository.load_unlocked(View::Active)?;
-        let index = notes
-            .entries
-            .iter()
-            .position(|entry| entry.id == Some(id))
-            .ok_or_else(|| anyhow::anyhow!("active entry {id} no longer exists"))?;
-        if &notes.entries[index] != expected {
-            bail!("entry {id} changed while its Roadmap was being generated; nothing was saved");
-        }
-        notes.entries[index].roadmap = Some(roadmap);
-        repository.save_unlocked(View::Active, &notes)
-    })
-}
-
-pub(crate) fn create(
-    workspace: &Workspace,
-    kind: Kind,
-    horizon: Option<Horizon>,
-    value: String,
-) -> Result<EntryId> {
-    let repository = Repository::open(workspace)?;
-    repository.exclusive(|repository| {
-        let (mut active, archived) = repository.all_unlocked()?;
-        IdSequences::require_all_ids([&active, &archived])?;
-        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
-        sequences.reconcile([&active, &archived])?;
-        let id = sequences.allocate(horizon, kind)?;
-        add(&mut active, Some(id), kind, horizon, value);
-        repository.save_unlocked(View::Active, &active)?;
-        sequences.save(&workspace.next_ids_path())?;
-        Ok(id)
-    })
-}
-
-pub(crate) fn archive_entry(workspace: &Workspace, query: &str) -> Result<()> {
-    let repository = Repository::open(workspace)?;
-    repository.exclusive(|repository| {
-        let (mut active, mut archived) = repository.all_unlocked()?;
-        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
-        sequences.reconcile([&active, &archived])?;
-        let index = find_index(&active, query)?;
-        let entry = active.entries.remove(index);
-        archived.entries.push(entry);
-        repository.save_both_unlocked(&active, &archived)
-    })?;
-    Ok(())
-}
-
-pub(crate) fn import_notes(workspace: &Workspace, source: &Path) -> Result<usize> {
-    let source_notes = load(source)?;
-    if source_notes.entries.is_empty() {
-        bail!("no entries found; import files using the NIT headings and '- text' entries");
-    }
-    let repository = Repository::open(workspace)?;
-    let imported_count = source_notes.entries.len();
-    repository.exclusive(|repository| {
-        let (mut target_notes, archived) = repository.all_unlocked()?;
-        IdSequences::require_all_ids([&target_notes, &archived])?;
-        let mut sequences = IdSequences::load(&workspace.next_ids_path())?;
-        let mut imported = source_notes;
-        for entry in &mut imported.entries {
-            if entry.id.is_some_and(|id| !id.is_current()) {
-                entry.id = None;
-            }
-        }
-        sequences.reconcile([&target_notes, &archived, &imported])?;
-        for entry in &mut imported.entries {
-            if entry.id.is_none() {
-                entry.id = Some(sequences.allocate(entry.horizon, entry.kind)?);
-            }
-        }
-        target_notes.entries.extend(imported.entries);
-        sequences.reconcile([&target_notes, &archived])?;
-        repository.save_unlocked(View::Active, &target_notes)?;
-        sequences.save(&workspace.next_ids_path())
-    })?;
-    Ok(imported_count)
 }
 
 pub(crate) fn migrate_timeless_ids(workspace: &Workspace) -> Result<usize> {
@@ -310,6 +208,8 @@ pub(crate) fn assign_missing_ids(workspace: &Workspace) -> Result<usize> {
 mod tests {
     use std::fs;
 
+    use crate::{model::Roadmap, repository::View};
+
     use super::*;
 
     #[test]
@@ -354,15 +254,18 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let workspace = Workspace::init(&directory).unwrap().workspace;
-        let id = create(&workspace, Kind::Note, None, "Learn".into()).unwrap();
-        let target = roadmap_target(&workspace, id).unwrap();
+        let repository = Repository::open(&workspace).unwrap();
+        let id = repository
+            .create_entry(Kind::Note, None, "Learn".into())
+            .unwrap();
+        let target = repository.roadmap_target(id).unwrap();
         let roadmap = Roadmap {
             steps: vec![crate::model::RoadmapStep {
                 title: "First".into(),
                 description: "Do the first step.".into(),
             }],
         };
-        attach_roadmap(&workspace, &target, roadmap.clone()).unwrap();
+        repository.attach_roadmap(&target, roadmap.clone()).unwrap();
         assert_eq!(
             Repository::open(&workspace)
                 .unwrap()
@@ -373,7 +276,7 @@ mod tests {
             Some(roadmap)
         );
 
-        let stale = roadmap_target(&workspace, id).unwrap_err();
+        let stale = repository.roadmap_target(id).unwrap_err();
         assert!(stale.to_string().contains("already has a Roadmap"));
         fs::remove_dir_all(directory).unwrap();
     }

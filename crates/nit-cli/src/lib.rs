@@ -354,7 +354,9 @@ fn initialize(mode: InitMode) -> Result<()> {
 }
 
 fn execute_in_workspace(action: Action, nit: &Nit) -> Result<()> {
-    let workspace = nit.workspace();
+    let workspace = nit
+        .workspace()
+        .ok_or_else(|| anyhow::anyhow!("this command requires a Plain Storage workspace path"))?;
     match action {
         Action::Tui => tui::run(nit)?,
         Action::Capture(message) => {

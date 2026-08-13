@@ -5,12 +5,14 @@ mod model;
 mod repository;
 mod storage;
 pub mod vault;
+mod vault_repository;
 mod workspace;
 
 pub use commands::{capture_text, find_index, parse_capture_code, text};
 pub use model::*;
 pub use repository::View;
 pub use storage::{render_notes, ACTIVE_TITLE, ARCHIVE_TITLE};
+pub use vault_repository::{VaultWorkspaceId, VaultWorkspaceInfo};
 pub use workspace::{appears_ignored, ensure_private, migrate, InitResult, Workspace};
 
 use anyhow::Result;
@@ -48,8 +50,30 @@ impl Nit {
         })
     }
 
-    pub fn workspace(&self) -> &Workspace {
+    pub fn open_vault(vault: Arc<vault::Vault>, workspace_id: VaultWorkspaceId) -> Result<Self> {
+        Ok(Self {
+            repository: Repository::open_vault(vault, workspace_id)?,
+            snapshots: Arc::new(Mutex::new([None, None])),
+        })
+    }
+
+    pub fn create_vault_workspace(
+        vault: &Arc<vault::Vault>,
+        name: impl Into<String>,
+    ) -> Result<VaultWorkspaceInfo> {
+        Repository::create_vault_workspace(vault, name)
+    }
+
+    pub fn vault_workspaces(vault: &vault::Vault) -> Result<Vec<VaultWorkspaceInfo>> {
+        Repository::vault_workspaces(vault)
+    }
+
+    pub fn workspace(&self) -> Option<&Workspace> {
         self.repository.workspace()
+    }
+
+    pub fn vault_workspace(&self) -> Result<Option<VaultWorkspaceInfo>> {
+        self.repository.vault_workspace()
     }
 
     pub fn load(&self, view: View) -> Result<Notes> {
@@ -125,25 +149,27 @@ impl Nit {
     }
 
     pub fn create(&self, kind: Kind, horizon: Option<Horizon>, text: String) -> Result<EntryId> {
-        let id = commands::create(self.workspace(), kind, horizon, text)?;
+        let id = self.repository.create_entry(kind, horizon, text)?;
         self.all()?;
         Ok(id)
     }
 
     pub fn archive(&self, query: &str) -> Result<()> {
-        commands::archive_entry(self.workspace(), query)?;
+        self.repository.archive_entry(query)?;
         self.all()?;
         Ok(())
     }
 
     pub fn import(&self, source: &std::path::Path) -> Result<usize> {
-        let count = commands::import_notes(self.workspace(), source)?;
+        let count = self.repository.import_entries(storage::load(source)?)?;
         self.all()?;
         Ok(count)
     }
 
     pub fn assign_missing_ids(&self) -> Result<usize> {
-        commands::assign_missing_ids(self.workspace())
+        self.workspace()
+            .map(commands::assign_missing_ids)
+            .unwrap_or(Ok(0))
     }
 
     pub fn assign_missing_ids_in(workspace: &Workspace) -> Result<usize> {
@@ -151,7 +177,9 @@ impl Nit {
     }
 
     pub fn migrate_timeless_ids(&self) -> Result<usize> {
-        commands::migrate_timeless_ids(self.workspace())
+        self.workspace()
+            .map(commands::migrate_timeless_ids)
+            .unwrap_or(Ok(0))
     }
 
     pub fn migrate_timeless_ids_in(workspace: &Workspace) -> Result<usize> {
@@ -159,11 +187,11 @@ impl Nit {
     }
 
     pub fn roadmap_target(&self, id: EntryId) -> Result<Entry> {
-        commands::roadmap_target(self.workspace(), id)
+        self.repository.roadmap_target(id)
     }
 
     pub fn attach_roadmap(&self, entry: &Entry, roadmap: Roadmap) -> Result<()> {
-        commands::attach_roadmap(self.workspace(), entry, roadmap)?;
+        self.repository.attach_roadmap(entry, roadmap)?;
         self.all()?;
         Ok(())
     }
@@ -196,7 +224,9 @@ fn view_index(view: View) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, sync::Arc};
+
+    use secrecy::SecretString;
 
     use super::*;
 
@@ -221,5 +251,103 @@ mod tests {
         assert!(format!("{error:#}").contains("workspace changed"));
         assert_eq!(first.load(View::Active).unwrap().entries.len(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vault_storage_matches_core_domain_behavior_without_plaintext_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let password = SecretString::from("vault password".to_owned());
+        let vault = Arc::new(vault::Vault::create(temp.path().join("vault"), &password).unwrap());
+        let first = Nit::create_vault_workspace(&vault, "Portable project").unwrap();
+        let second = Nit::create_vault_workspace(&vault, "Independent project").unwrap();
+        let nit = Nit::open_vault(vault.clone(), first.id).unwrap();
+        let stale = Nit::open_vault(vault.clone(), first.id).unwrap();
+        let (stale_active, _) = stale.all().unwrap();
+
+        let note = nit
+            .create(Kind::Note, None, "Encrypted architecture".into())
+            .unwrap();
+        let idea = nit
+            .create(Kind::Idea, Some(Horizon::Long), "Portable mode".into())
+            .unwrap();
+        let todo = nit
+            .create(Kind::Todo, Some(Horizon::Short), "Test removal".into())
+            .unwrap();
+        assert_eq!(note.to_string(), "N-0001");
+        assert_eq!(idea.to_string(), "LI-0001");
+        assert_eq!(todo.to_string(), "ST-0001");
+        assert!(nit
+            .create(Kind::Note, Some(Horizon::Short), "invalid".into())
+            .is_err());
+
+        let import_path = temp.path().join("import.md");
+        let import_source = Notes {
+            entries: vec![Entry {
+                id: None,
+                kind: Kind::Item,
+                horizon: None,
+                text: "Imported reference".into(),
+                body: String::new(),
+                roadmap: None,
+            }],
+        };
+        fs::write(
+            &import_path,
+            render_notes(&import_source, None, None, ACTIVE_TITLE),
+        )
+        .unwrap();
+        assert_eq!(nit.import(&import_path).unwrap(), 1);
+
+        let mut active = nit.load(View::Active).unwrap();
+        let note_entry = active
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == Some(note))
+            .unwrap();
+        note_entry.body = "Plaintext must remain only in memory.".into();
+        nit.save(View::Active, &active).unwrap();
+
+        let target = nit.roadmap_target(todo).unwrap();
+        nit.attach_roadmap(
+            &target,
+            Roadmap {
+                steps: vec![RoadmapStep {
+                    title: "Disconnect".into(),
+                    description: "Verify the session is invalidated.".into(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            nit.search("disconnect", &[View::Active], None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        nit.archive("Encrypted architecture").unwrap();
+        let status = nit.status().unwrap();
+        assert_eq!(status.active_entries, 3);
+        assert_eq!(status.archived_entries, 1);
+        assert!(stale.save(View::Active, &stale_active).is_err());
+
+        let other = Nit::open_vault(vault.clone(), second.id).unwrap();
+        assert_eq!(other.status().unwrap().active_entries, 0);
+        assert!(nit.workspace().is_none());
+        assert_eq!(nit.vault_workspace().unwrap().unwrap(), first);
+
+        drop(other);
+        drop(stale);
+        drop(nit);
+        drop(vault);
+        let reopened = Arc::new(vault::Vault::open(temp.path().join("vault"), &password).unwrap());
+        let reopened_nit = Nit::open_vault(reopened, first.id).unwrap();
+        assert_eq!(reopened_nit.status().unwrap(), status);
+
+        let needle = b"Plaintext must remain only in memory.";
+        for item in fs::read_dir(temp.path().join("vault/objects")).unwrap() {
+            let bytes = fs::read(item.unwrap().path()).unwrap();
+            assert!(!bytes.windows(needle.len()).any(|window| window == needle));
+        }
     }
 }
