@@ -16,6 +16,7 @@ members = [
     "crates/nit-cli",
     "crates/nit-core",
     "crates/nit-editor",
+    "crates/nit-session",
     "crates/nit-tui",
     "crates/nitcat",
 ]
@@ -36,6 +37,7 @@ chacha20poly1305 = "0.11.0"
 crossterm = "0.29"
 fs2 = "0.4"
 getrandom = "0.4.3"
+interprocess = "2.4.3"
 postcard = { version = "1.1.3", features = ["use-std"] }
 pulldown-cmark = "0.13"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

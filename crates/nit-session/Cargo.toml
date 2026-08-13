@@ -1,0 +1,24 @@
+[package]
+name = "nit-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ephemeral local session agent for NIT Vault"
+
+[[bin]]
+name = "nit-session-agent"
+path = "src/bin/nit-session-agent.rs"
+
+[dependencies]
+anyhow.workspace = true
+interprocess.workspace = true
+nit-core = { path = "../nit-core" }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

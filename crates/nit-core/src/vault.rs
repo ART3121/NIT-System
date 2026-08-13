@@ -283,6 +283,11 @@ impl Vault {
         self.vault_id
     }
 
+    /// Returns the directory containing this Vault's encrypted format.
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
     /// Commits a non-empty state as a new immutable encrypted object.
     ///
     /// The object is persisted before an alternating authenticated root is
