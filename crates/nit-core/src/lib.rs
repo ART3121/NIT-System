@@ -92,6 +92,16 @@ impl Nit {
         Repository::vault_workspaces(vault)
     }
 
+    #[doc(hidden)]
+    pub fn bind_vault(vault: &vault::Vault, binding: &str) -> Result<()> {
+        Repository::bind_vault(vault, binding)
+    }
+
+    #[doc(hidden)]
+    pub fn vault_binding(vault: &vault::Vault) -> Result<Option<String>> {
+        Repository::vault_binding(vault)
+    }
+
     pub fn workspace(&self) -> Option<&Workspace> {
         self.repository.workspace()
     }

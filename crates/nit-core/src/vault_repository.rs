@@ -62,6 +62,7 @@ pub(crate) struct VaultRepository {
 #[derive(Serialize, Deserialize)]
 struct CatalogV1 {
     format_version: u16,
+    binding: Option<String>,
     workspaces: Vec<WorkspaceV1>,
 }
 
@@ -104,6 +105,7 @@ impl CatalogV1 {
     fn empty() -> Self {
         Self {
             format_version: CATALOG_FORMAT_VERSION,
+            binding: None,
             workspaces: Vec::new(),
         }
     }
@@ -133,6 +135,11 @@ impl CatalogV1 {
         if self.workspaces.len() > MAX_WORKSPACES {
             bail!("Vault contains too many workspaces");
         }
+        if self.binding.as_ref().is_some_and(|binding| {
+            binding.is_empty() || binding.len() > 128 || binding.chars().any(char::is_control)
+        }) {
+            bail!("invalid authenticated Vault binding");
+        }
         let mut ids = HashSet::new();
         for workspace in &self.workspaces {
             validate_name(&workspace.name)?;
@@ -145,6 +152,29 @@ impl CatalogV1 {
 }
 
 impl VaultRepository {
+    pub(crate) fn bind(vault: &Vault, binding: &str) -> Result<()> {
+        if binding.is_empty() || binding.len() > 128 || binding.chars().any(char::is_control) {
+            bail!("invalid Vault binding");
+        }
+        vault.transaction(|payload| {
+            let mut catalog = CatalogV1::decode(payload)?;
+            if catalog
+                .binding
+                .as_deref()
+                .is_some_and(|value| value != binding)
+            {
+                bail!("Vault is already bound to a different context");
+            }
+            catalog.binding = Some(binding.to_owned());
+            Ok((catalog.encode()?, ()))
+        })
+    }
+
+    pub(crate) fn binding(vault: &Vault) -> Result<Option<String>> {
+        let payload = vault.load_latest()?;
+        Ok(CatalogV1::decode(payload.as_deref().map(Vec::as_slice))?.binding)
+    }
+
     pub(crate) fn create_workspace(
         vault: &Arc<Vault>,
         name: impl Into<String>,

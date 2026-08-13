@@ -347,7 +347,7 @@ fn execute(action: Action) -> Result<()> {
         Action::Unlock { vault, workspace } => {
             let client = ensure_session_agent()?;
             let password = rpassword::prompt_password("Vault password: ")?;
-            let status = client.unlock(vault, workspace, password)?;
+            let status = client.unlock_drive(vault, workspace, password)?;
             print_session_status(&status)
         }
         Action::Lock => {
@@ -717,7 +717,7 @@ Usage:
   nit -migrate                             Migrate legacy files
   nit -assign-ids                          Assign IDs to existing entries
   nit -migrate-timeless                    Convert timed Note/Item IDs safely
-  nit -unlock <vault-path> <workspace-id>  Unlock a Vault in the Session Agent
+  nit -unlock <drive-path> <workspace-id>  Unlock a NIT Drive session
   nit -lock                                Lock the active Vault session
   nit -session-status                      Show Vault session state
   nit -ai-roadmap <ID>                     Generate a local AI Roadmap

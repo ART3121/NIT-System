@@ -22,7 +22,7 @@ use nit_core::{
     vault::Vault, Entry, EntryId, Horizon, Kind, LocatedEntry, Nit, NitApi, Notes, Roadmap,
     Status as NitStatus, VaultWorkspaceId, View,
 };
-use nit_drive::RemovalDetector;
+use nit_drive::{NitDrive, RemovalDetector};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -52,6 +52,12 @@ enum Request {
     Unlock {
         protocol: u16,
         vault_path: PathBuf,
+        workspace_id: String,
+        password: String,
+    },
+    UnlockDrive {
+        protocol: u16,
+        drive_root: PathBuf,
         workspace_id: String,
         password: String,
     },
@@ -124,6 +130,7 @@ impl Request {
         match self {
             Self::Status { protocol }
             | Self::Unlock { protocol, .. }
+            | Self::UnlockDrive { protocol, .. }
             | Self::Lock { protocol }
             | Self::Shutdown { protocol }
             | Self::Load { protocol, .. }
@@ -169,7 +176,7 @@ struct UnlockedSession {
     unavailable: Arc<AtomicBool>,
     stop_monitor: Arc<AtomicBool>,
     monitor: Option<thread::JoinHandle<()>>,
-    vault_path: PathBuf,
+    availability_marker: PathBuf,
     vault_id: String,
     workspace_id: String,
     workspace_name: String,
@@ -179,6 +186,7 @@ impl UnlockedSession {
     fn new(
         nit: Nit,
         vault_path: PathBuf,
+        availability_marker: PathBuf,
         vault_id: String,
         workspace_id: String,
         workspace_name: String,
@@ -210,7 +218,7 @@ impl UnlockedSession {
             unavailable,
             stop_monitor,
             monitor: Some(monitor),
-            vault_path,
+            availability_marker,
             vault_id,
             workspace_id,
             workspace_name,
@@ -251,8 +259,7 @@ struct AgentState {
 impl AgentState {
     fn status(&mut self) -> SessionStatus {
         if self.unlocked.as_ref().is_some_and(|session| {
-            session.unavailable.load(Ordering::Acquire)
-                || !vault_still_available(&session.vault_path)
+            session.unavailable.load(Ordering::Acquire) || !session.availability_marker.is_file()
         }) {
             self.unlocked = None;
             self.unavailable = true;
@@ -274,9 +281,36 @@ impl AgentState {
         workspace_id: &str,
         password: SecretString,
     ) -> Result<SessionStatus> {
-        let workspace_id: VaultWorkspaceId = workspace_id.parse()?;
         let vault = Arc::new(Vault::open(vault_path, &password)?);
         drop(password);
+        self.activate(vault, vault_path, vault_path.join("header"), workspace_id)
+    }
+
+    fn unlock_drive(
+        &mut self,
+        drive_root: &Path,
+        workspace_id: &str,
+        password: SecretString,
+    ) -> Result<SessionStatus> {
+        let drive = NitDrive::open(drive_root)?;
+        let vault = drive.unlock(&password)?;
+        drop(password);
+        self.activate(
+            vault,
+            drive.root(),
+            drive.root().join(".nit-drive/header"),
+            workspace_id,
+        )
+    }
+
+    fn activate(
+        &mut self,
+        vault: Arc<Vault>,
+        presence_path: &Path,
+        availability_marker: PathBuf,
+        workspace_id: &str,
+    ) -> Result<SessionStatus> {
+        let workspace_id: VaultWorkspaceId = workspace_id.parse()?;
         let vault_id = hex_encode(&vault.id());
         let nit = Nit::open_vault(vault.clone(), workspace_id)?;
         let info = nit
@@ -284,7 +318,8 @@ impl AgentState {
             .ok_or_else(|| anyhow!("Vault workspace is unavailable"))?;
         self.unlocked = Some(UnlockedSession::new(
             nit,
-            vault.path().to_path_buf(),
+            presence_path.to_path_buf(),
+            availability_marker,
             vault_id,
             info.id.to_string(),
             info.name,
@@ -408,6 +443,28 @@ impl SessionClient {
                 Ok(status)
             }
             _ => bail!("invalid NIT Session unlock response"),
+        }
+    }
+
+    pub fn unlock_drive(
+        &self,
+        drive_root: impl Into<PathBuf>,
+        workspace_id: VaultWorkspaceId,
+        mut password: String,
+    ) -> Result<SessionStatus> {
+        let request = Request::UnlockDrive {
+            protocol: PROTOCOL_VERSION,
+            drive_root: drive_root.into(),
+            workspace_id: workspace_id.to_string(),
+            password: std::mem::take(&mut password),
+        };
+        password.zeroize();
+        match self.call(request)? {
+            Reply::Session(status) => {
+                self.clear_snapshots()?;
+                Ok(status)
+            }
+            _ => bail!("invalid NIT Session NIT Drive unlock response"),
         }
     }
 
@@ -663,6 +720,17 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
                 .unlock(vault_path, workspace_id, secret)
                 .map(Reply::Session)
         }
+        Request::UnlockDrive {
+            drive_root,
+            workspace_id,
+            password,
+            ..
+        } => {
+            let secret = SecretString::from(std::mem::take(password));
+            state
+                .unlock_drive(drive_root, workspace_id, secret)
+                .map(Reply::Session)
+        }
         Request::Lock { .. } | Request::Shutdown { .. } => Ok(Reply::Session(state.lock())),
         Request::Load { view, .. } => state.with_nit(|nit| nit.load(*view)).map(Reply::Notes),
         Request::Save {
@@ -797,10 +865,6 @@ pub fn default_endpoint() -> String {
     )
 }
 
-fn vault_still_available(path: &Path) -> bool {
-    path.is_dir() && path.join("header").is_file() && path.join("objects").is_dir()
-}
-
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -821,9 +885,19 @@ mod tests {
 
     use secrecy::SecretString;
 
+    use nit_drive::{DeviceSource, NitDriveInitializer, RemovableDevice};
+
     use super::*;
 
     static NEXT_ENDPOINT: AtomicU64 = AtomicU64::new(1);
+
+    struct FakeDriveSource(RemovableDevice);
+
+    impl DeviceSource for FakeDriveSource {
+        fn discover(&self) -> Result<Vec<RemovableDevice>> {
+            Ok(vec![self.0.clone()])
+        }
+    }
 
     fn endpoint() -> String {
         format!(
@@ -971,5 +1045,35 @@ mod tests {
         }
         assert!(key_slot.lock().unwrap().is_none());
         assert_eq!(state.status(), SessionStatus::Unavailable);
+    }
+
+    #[test]
+    fn unlocks_a_versioned_nit_drive_and_serves_domain_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let password = SecretString::from("password".to_owned());
+        let initialized = NitDriveInitializer::new(FakeDriveSource(RemovableDevice {
+            id: "/dev/test".into(),
+            model: "Test Drive".into(),
+            capacity_bytes: 1024 * 1024 * 1024,
+            mount_points: vec![temp.path().to_path_buf()],
+            removable: true,
+            system_disk: false,
+            read_only: false,
+        }))
+        .initialize("/dev/test", temp.path(), &password, "Portable")
+        .unwrap();
+        let endpoint = endpoint();
+        let handle = start_agent(&endpoint);
+        let client = SessionClient::new(&endpoint).unwrap();
+        wait_for_agent(&client);
+
+        client
+            .unlock_drive(temp.path(), initialized.workspace.id, "password".into())
+            .unwrap();
+        let id = NitApi::create(&client, Kind::Note, None, "On drive".into()).unwrap();
+        assert_eq!(id.to_string(), "N-0001");
+        client.shutdown_agent().unwrap();
+        handle.join().unwrap();
+        assert!(!temp.path().join(".nit").exists());
     }
 }

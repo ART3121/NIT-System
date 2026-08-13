@@ -80,6 +80,14 @@ impl Repository {
         VaultRepository::list_workspaces(vault)
     }
 
+    pub(crate) fn bind_vault(vault: &Vault, binding: &str) -> Result<()> {
+        VaultRepository::bind(vault, binding)
+    }
+
+    pub(crate) fn vault_binding(vault: &Vault) -> Result<Option<String>> {
+        VaultRepository::binding(vault)
+    }
+
     pub(crate) fn load(&self, view: View) -> Result<Notes> {
         if let RepositoryBackend::Vault(repository) = &self.backend {
             let state = repository.read()?;

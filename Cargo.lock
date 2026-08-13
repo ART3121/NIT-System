@@ -709,6 +709,9 @@ name = "nit-drive"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "getrandom",
+ "nit-core",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",

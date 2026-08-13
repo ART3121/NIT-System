@@ -5,7 +5,10 @@ use std::{path::PathBuf, process::Command};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+mod nit_drive;
 mod platform;
+
+pub use nit_drive::{InitializedDrive, NitDrive, NitDriveInitializer};
 
 /// Captures the current physical/mount presence of a Vault path.
 ///
