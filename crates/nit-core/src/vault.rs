@@ -216,7 +216,7 @@ impl Vault {
         let vault_id = random_array()?;
         let salt = random_array()?;
         let wrap_nonce = random_array()?;
-        let master_key = random_array()?;
+        let master_key = Zeroizing::new(random_array()?);
         let derived_key = derive_key(password, &salt, kdf)?;
 
         let mut header = VaultHeaderV1 {
@@ -232,7 +232,7 @@ impl Vault {
         header.wrapped_master_key = encrypt(
             &derived_key,
             &header.wrap_nonce,
-            &master_key,
+            master_key.as_ref(),
             &aad,
             "could not protect Vault Master Key",
         )?;
@@ -243,7 +243,7 @@ impl Vault {
         Ok(Self {
             root: root.to_path_buf(),
             vault_id,
-            master_key: SecretBox::new(Box::new(master_key)),
+            master_key: SecretBox::new(Box::new(*master_key)),
         })
     }
 
@@ -268,13 +268,13 @@ impl Vault {
         if decrypted.len() != MASTER_KEY_BYTES {
             bail!("invalid decrypted Vault Master Key length");
         }
-        let mut master_key = [0_u8; MASTER_KEY_BYTES];
+        let mut master_key = Zeroizing::new([0_u8; MASTER_KEY_BYTES]);
         master_key.copy_from_slice(&decrypted);
 
         Ok(Self {
             root: root.to_path_buf(),
             vault_id: header.vault_id,
-            master_key: SecretBox::new(Box::new(master_key)),
+            master_key: SecretBox::new(Box::new(*master_key)),
         })
     }
 
@@ -314,6 +314,7 @@ impl Vault {
             .map(|root| self.read_object(root.object_id))
             .transpose()?;
         let (next, value) = operation(current.as_deref().map(Vec::as_slice))?;
+        let next = Zeroizing::new(next);
         validate_payload(&next)?;
         self.commit_unlocked(&next)?;
         Ok(value)

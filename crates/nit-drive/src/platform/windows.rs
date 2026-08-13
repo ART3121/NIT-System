@@ -1,26 +1,73 @@
-use std::{path::PathBuf, process::Command};
+use std::{iter, os::windows::ffi::OsStrExt, path::PathBuf, process::Command};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use windows_sys::Win32::Storage::FileSystem::{
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+};
 
 use crate::{PlannedOperation, RemovableDevice};
 
 pub(crate) struct PresenceToken {
     canonical_path: PathBuf,
+    volume_name: String,
 }
 
 impl PresenceToken {
     pub(crate) fn capture(path: &std::path::Path) -> Result<Self> {
+        let canonical_path = path
+            .canonicalize()
+            .with_context(|| format!("Vault path is unavailable: {}", path.display()))?;
         Ok(Self {
-            canonical_path: path
-                .canonicalize()
-                .with_context(|| format!("Vault path is unavailable: {}", path.display()))?,
+            volume_name: volume_name(&canonical_path)?,
+            canonical_path,
         })
     }
 
     pub(crate) fn is_present(&self) -> bool {
         self.canonical_path.canonicalize().ok().as_ref() == Some(&self.canonical_path)
+            && volume_name(&self.canonical_path).ok().as_ref() == Some(&self.volume_name)
     }
+}
+
+fn volume_name(path: &std::path::Path) -> Result<String> {
+    const BUFFER_CHARS: usize = 32_768;
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let mut mount = vec![0_u16; BUFFER_CHARS];
+    // SAFETY: both UTF-16 buffers are NUL-terminated/writable for their stated lengths.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("could not identify Vault volume");
+    }
+    let mount_end = mount
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(mount.len());
+    if mount_end == mount.len() {
+        bail!("invalid Windows Vault volume path");
+    }
+    mount.truncate(mount_end + 1);
+
+    let mut name = vec![0_u16; BUFFER_CHARS];
+    // SAFETY: `mount` is NUL-terminated and `name` is writable for its stated length.
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), name.as_mut_ptr(), name.len() as u32)
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("could not read Vault volume identity");
+    }
+    let name_end = name
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(name.len());
+    if name_end == 0 || name_end == name.len() {
+        bail!("invalid Windows Vault volume identity");
+    }
+    String::from_utf16(&name[..name_end]).context("Vault volume identity is not valid UTF-16")
 }
 
 const DISCOVERY_SCRIPT: &str = r#"

@@ -43,11 +43,11 @@ it provides weaker crash guarantees than native journaled filesystems:
   leave an unformatted or partially formatted device. It cannot create a local
   `.nit/` fallback.
 
-The Session Agent binds an unlock to the current mount generation on Linux.
-Removal revokes and drops the in-memory `Nit`/Master Key; reinserting the same
-device requires the password again. Windows uses conservative path/volume
-presence polling and receives a platform-specific implementation behind the
-same API.
+The Session Agent binds an unlock to the current mount generation on Linux and
+to the current volume identity on Windows. Removal revokes and drops the
+in-memory `Nit`/Master Key; reinserting the same device requires the password
+again. A replacement volume mounted at the same Windows drive letter is also
+rejected. Platform-specific detection remains behind one shared API.
 
 Provisioning always performs fresh discovery, rejects internal/system/boot,
 read-only and ambiguous disks, requires a confirmation containing identifier,

@@ -263,7 +263,7 @@ impl Nit {
 
 impl NitApi for Nit {
     fn allows_external_editor(&self) -> bool {
-        true
+        self.workspace().is_some()
     }
 
     fn load(&self, view: View) -> Result<Notes> {
@@ -439,6 +439,7 @@ mod tests {
         let other = Nit::open_vault(vault.clone(), second.id).unwrap();
         assert_eq!(other.status().unwrap().active_entries, 0);
         assert!(nit.workspace().is_none());
+        assert!(!NitApi::allows_external_editor(&nit));
         assert_eq!(nit.vault_workspace().unwrap().unwrap(), first);
 
         drop(other);

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -187,11 +187,13 @@ fn discover_from(sys_block: &Path, mountinfo: &Path) -> Result<Vec<RemovableDevi
         }
         let path = item.path();
         let dev = read_trimmed_optional(&path.join("dev"))?;
+        let slaves = read_directory_names_optional(&path.join("slaves"))?;
         records.push(BlockRecord {
             name,
             path,
             dev,
             partition: item.path().join("partition").is_file(),
+            slaves,
         });
     }
 
@@ -200,23 +202,12 @@ fn discover_from(sys_block: &Path, mountinfo: &Path) -> Result<Vec<RemovableDevi
         .filter(|record| !record.partition)
         .map(|record| record.name.as_str())
         .collect::<Vec<_>>();
-    let mut dev_to_top = HashMap::new();
+    let mut dev_to_name = HashMap::new();
     for record in &records {
         let Some(dev) = &record.dev else {
             continue;
         };
-        let top = if record.partition {
-            top_names
-                .iter()
-                .filter(|name| partition_belongs_to(&record.name, name))
-                .max_by_key(|name| name.len())
-                .copied()
-        } else {
-            Some(record.name.as_str())
-        };
-        if let Some(top) = top {
-            dev_to_top.insert(dev.clone(), top.to_owned());
-        }
+        dev_to_name.insert(dev.clone(), record.name.clone());
     }
 
     let mounts = parse_mountinfo(&fs::read_to_string(mountinfo).with_context(|| {
@@ -227,11 +218,22 @@ fn discover_from(sys_block: &Path, mountinfo: &Path) -> Result<Vec<RemovableDevi
     })?)?;
     let mut mounts_by_top: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for mount in mounts {
-        if let Some(top) = dev_to_top.get(&mount.device_number) {
+        let Some(name) = dev_to_name.get(&mount.device_number) else {
+            continue;
+        };
+        let mut top_devices = HashSet::new();
+        resolve_top_devices(
+            name,
+            &records,
+            &top_names,
+            &mut HashSet::new(),
+            &mut top_devices,
+        )?;
+        for top in top_devices {
             mounts_by_top
-                .entry(top.clone())
+                .entry(top)
                 .or_default()
-                .push(mount.mount_point);
+                .push(mount.mount_point.clone());
         }
     }
 
@@ -273,6 +275,42 @@ struct BlockRecord {
     path: PathBuf,
     dev: Option<String>,
     partition: bool,
+    slaves: Vec<String>,
+}
+
+fn resolve_top_devices(
+    name: &str,
+    records: &[BlockRecord],
+    top_names: &[&str],
+    visiting: &mut HashSet<String>,
+    output: &mut HashSet<String>,
+) -> Result<()> {
+    if !visiting.insert(name.to_owned()) {
+        bail!("cyclic Linux block device dependency; discovery is ambiguous");
+    }
+    let record = records
+        .iter()
+        .find(|record| record.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown Linux block device dependency"))?;
+    if record.partition {
+        let parent = top_names
+            .iter()
+            .filter(|top| partition_belongs_to(name, top))
+            .max_by_key(|top| top.len())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!("orphan Linux block partition; discovery is ambiguous")
+            })?;
+        resolve_top_devices(parent, records, top_names, visiting, output)?;
+    } else if record.slaves.is_empty() {
+        output.insert(name.to_owned());
+    } else {
+        for slave in &record.slaves {
+            resolve_top_devices(slave, records, top_names, visiting, output)?;
+        }
+    }
+    visiting.remove(name);
+    Ok(())
 }
 
 struct MountRecord {
@@ -381,6 +419,29 @@ fn read_trimmed_optional(path: &Path) -> Result<Option<String>> {
     }
 }
 
+fn read_directory_names_optional(path: &Path) -> Result<Vec<String>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", path.display()))
+        }
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        if names.len() >= MAX_DEVICES {
+            bail!("too many Linux block device dependencies; discovery is ambiguous");
+        }
+        names.push(
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("Linux block dependency is not valid UTF-8"))?,
+        );
+    }
+    Ok(names)
+}
+
 fn parse_u64_optional(value: Option<String>) -> Result<Option<u64>> {
     value
         .map(|value| value.parse().context("invalid Linux block device size"))
@@ -458,6 +519,31 @@ mod tests {
         let devices = discover_from(&sys, &mountinfo).unwrap();
         assert!(devices[0].system_disk);
         assert!(devices[0].is_ambiguous());
+    }
+
+    #[test]
+    fn marks_physical_disk_beneath_device_mapper_root_as_system() {
+        let temp = tempfile::tempdir().unwrap();
+        let sys = temp.path().join("sys");
+        fs::create_dir(&sys).unwrap();
+        write_device(&sys, "sdb", "8:16", false, "1", "2000", Some("USB Root"));
+        write_device(&sys, "sdb1", "8:17", true, "1", "1900", None);
+        write_device(&sys, "dm-0", "253:0", false, "0", "1800", Some("LVM"));
+        fs::create_dir_all(sys.join("dm-0/slaves/sdb1")).unwrap();
+        let mountinfo = temp.path().join("mountinfo");
+        fs::write(
+            &mountinfo,
+            "36 25 253:0 / / rw - ext4 /dev/mapper/root rw\n",
+        )
+        .unwrap();
+
+        let devices = discover_from(&sys, &mountinfo).unwrap();
+        let physical = devices
+            .iter()
+            .find(|device| device.id == "/dev/sdb")
+            .unwrap();
+        assert!(physical.system_disk);
+        assert_eq!(physical.mount_points, [PathBuf::from("/")]);
     }
 
     #[test]

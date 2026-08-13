@@ -362,10 +362,13 @@ impl SessionAgent {
         let mut state = AgentState::default();
         for connection in listener.incoming() {
             let mut connection = connection.context("NIT Session connection failed")?;
+            if transport::authenticate(&connection).is_err() {
+                continue;
+            }
             let request = match read_message::<Request>(&mut connection) {
                 Ok(request) => request,
                 Err(error) => {
-                    write_response(
+                    let _ = write_response(
                         &mut connection,
                         Response {
                             protocol: PROTOCOL_VERSION,
@@ -373,13 +376,13 @@ impl SessionAgent {
                             reply: None,
                             error: Some(error.to_string()),
                         },
-                    )?;
+                    );
                     continue;
                 }
             };
             let shutdown = matches!(request, Request::Shutdown { .. });
             let response = handle_request(&mut state, request);
-            write_response(&mut connection, response)?;
+            let _ = write_response(&mut connection, response);
             if shutdown {
                 break;
             }
@@ -980,6 +983,22 @@ mod tests {
             .unlock(temp.path().join("vault"), workspace.id, "wrong".into())
             .is_err());
         assert_eq!(client.status().unwrap(), SessionStatus::Locked);
+        client.shutdown_agent().unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_or_competing_local_connections_do_not_kill_the_agent() {
+        let endpoint = endpoint();
+        let handle = start_agent(&endpoint);
+        let client = SessionClient::new(&endpoint).unwrap();
+        wait_for_agent(&client);
+
+        assert!(transport::listen(&endpoint).is_err());
+        assert_eq!(client.status().unwrap(), SessionStatus::Locked);
+        drop(transport::connect(&endpoint).unwrap());
+        assert_eq!(client.status().unwrap(), SessionStatus::Locked);
+
         client.shutdown_agent().unwrap();
         handle.join().unwrap();
     }

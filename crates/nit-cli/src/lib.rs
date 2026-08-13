@@ -321,6 +321,7 @@ fn execute(action: Action) -> Result<()> {
             Ok(())
         }
         Action::AssignIds => {
+            ensure_plain_maintenance_allowed()?;
             let workspace = Workspace::discover()?;
             let assigned = Nit::assign_missing_ids_in(&workspace)?;
             if assigned == 0 {
@@ -332,6 +333,7 @@ fn execute(action: Action) -> Result<()> {
             Ok(())
         }
         Action::MigrateTimeless => {
+            ensure_plain_maintenance_allowed()?;
             let workspace = Workspace::discover()?;
             let migrated = Nit::migrate_timeless_ids_in(&workspace)?;
             if migrated == 0 {
@@ -370,26 +372,51 @@ fn execute(action: Action) -> Result<()> {
                 }
             }
         }
-        action => match Nit::discover() {
-            Ok(nit) => {
-                let workspace = nit
-                    .workspace()
-                    .expect("a discovered NIT instance uses Plain Storage");
-                execute_in_workspace(action, &nit, StorageContext::Plain(workspace))
-            }
-            Err(plain_error) => {
-                let client = SessionClient::default();
-                match client.status() {
-                    Ok(status @ SessionStatus::Unlocked { .. }) => {
-                        execute_in_workspace(action, &client, StorageContext::Vault(status))
-                    }
-                    Ok(SessionStatus::Unavailable) => {
-                        bail!("NIT Drive is unavailable; reconnect and run `nit -unlock` again")
-                    }
-                    Ok(SessionStatus::Locked) | Err(_) => Err(plain_error),
+        action => {
+            let client = SessionClient::default();
+            match storage_preference(client.status()) {
+                StoragePreference::Vault(status) => {
+                    execute_in_workspace(action, &client, StorageContext::Vault(status))
+                }
+                StoragePreference::Unavailable => {
+                    bail!("NIT Drive is unavailable; reconnect and run `nit -unlock` again")
+                }
+                StoragePreference::Plain => {
+                    let nit = Nit::discover()?;
+                    let workspace = nit
+                        .workspace()
+                        .expect("a discovered NIT instance uses Plain Storage");
+                    execute_in_workspace(action, &nit, StorageContext::Plain(workspace))
                 }
             }
-        },
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StoragePreference {
+    Plain,
+    Vault(SessionStatus),
+    Unavailable,
+}
+
+fn storage_preference(status: Result<SessionStatus>) -> StoragePreference {
+    match status {
+        Ok(status @ SessionStatus::Unlocked { .. }) => StoragePreference::Vault(status),
+        Ok(SessionStatus::Unavailable) => StoragePreference::Unavailable,
+        Ok(SessionStatus::Locked) | Err(_) => StoragePreference::Plain,
+    }
+}
+
+fn ensure_plain_maintenance_allowed() -> Result<()> {
+    match storage_preference(SessionClient::default().status()) {
+        StoragePreference::Plain => Ok(()),
+        StoragePreference::Vault(_) => {
+            bail!("this maintenance command is only available for Plain Storage; run `nit -lock` first")
+        }
+        StoragePreference::Unavailable => {
+            bail!("NIT Drive is unavailable; reconnect and run `nit -unlock` again")
+        }
     }
 }
 
@@ -828,6 +855,31 @@ mod tests {
         assert_eq!(
             parse_arguments(words(&["-session-status"])).unwrap(),
             Action::SessionStatus
+        );
+    }
+
+    #[test]
+    fn active_or_unavailable_drive_never_falls_back_to_plain_storage() {
+        let unlocked = SessionStatus::Unlocked {
+            vault_id: "vault".into(),
+            workspace_id: "workspace".into(),
+            workspace_name: "NIT".into(),
+        };
+        assert_eq!(
+            storage_preference(Ok(unlocked.clone())),
+            StoragePreference::Vault(unlocked)
+        );
+        assert_eq!(
+            storage_preference(Ok(SessionStatus::Unavailable)),
+            StoragePreference::Unavailable
+        );
+        assert_eq!(
+            storage_preference(Ok(SessionStatus::Locked)),
+            StoragePreference::Plain
+        );
+        assert_eq!(
+            storage_preference(Err(anyhow::anyhow!("agent absent"))),
+            StoragePreference::Plain
         );
     }
 
