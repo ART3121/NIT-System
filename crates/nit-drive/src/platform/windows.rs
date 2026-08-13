@@ -95,8 +95,9 @@ pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<Pl
             "-NoProfile".into(),
             "-NonInteractive".into(),
             "-Command".into(),
-            "& { param([int]$DiskNumber) Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm:$false; Initialize-Disk -Number $DiskNumber -PartitionStyle GPT; New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem exFAT -NewFileSystemLabel NIT_DRIVE -Confirm:$false }".into(),
+            "& { param([int]$DiskNumber, [UInt64]$ExpectedSize) $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop; if ($disk.IsSystem -or $disk.IsBoot -or $disk.IsReadOnly -or $disk.Size -ne $ExpectedSize -or $disk.BusType -notin @('USB','SD','MMC')) { throw 'Device failed NIT Drive safety validation' }; Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm:$false; Initialize-Disk -Number $DiskNumber -PartitionStyle GPT; New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem exFAT -NewFileSystemLabel NIT_DRIVE -Confirm:$false }".into(),
             disk_number.to_string(),
+            device.capacity_bytes.to_string(),
         ],
         destructive: true,
     }])

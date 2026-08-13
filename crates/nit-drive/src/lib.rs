@@ -1,6 +1,6 @@
 //! Read-only device discovery and conservative NIT Drive lifecycle.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::Command};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -81,38 +81,95 @@ pub struct PlannedOperation {
     pub destructive: bool,
 }
 
-/// Conservative provisioning planner. `dry_run` never invokes a program.
-pub struct Provisioner<S = SystemDeviceSource> {
-    source: S,
+pub trait CommandExecutor {
+    fn execute(&self, operation: &PlannedOperation) -> Result<()>;
 }
 
-impl Default for Provisioner<SystemDeviceSource> {
+pub struct SystemCommandExecutor;
+
+impl CommandExecutor for SystemCommandExecutor {
+    fn execute(&self, operation: &PlannedOperation) -> Result<()> {
+        let output = Command::new(&operation.program)
+            .args(&operation.arguments)
+            .output()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "could not execute provisioning program {}: {error}",
+                    operation.program
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "provisioning program {} failed with {}: {}",
+                operation.program,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Conservative provisioning planner. `dry_run` never invokes a program.
+pub struct Provisioner<S = SystemDeviceSource, E = SystemCommandExecutor> {
+    source: S,
+    executor: E,
+}
+
+impl Default for Provisioner<SystemDeviceSource, SystemCommandExecutor> {
     fn default() -> Self {
         Self {
             source: SystemDeviceSource,
+            executor: SystemCommandExecutor,
         }
     }
 }
 
-impl<S: DeviceSource> Provisioner<S> {
+impl<S: DeviceSource> Provisioner<S, SystemCommandExecutor> {
     pub fn new(source: S) -> Self {
-        Self { source }
+        Self {
+            source,
+            executor: SystemCommandExecutor,
+        }
+    }
+}
+
+impl<S: DeviceSource, E: CommandExecutor> Provisioner<S, E> {
+    pub fn with_executor(source: S, executor: E) -> Self {
+        Self { source, executor }
     }
 
     pub fn dry_run(&self, device_id: &str) -> Result<ProvisioningPlan> {
+        self.plan_from_fresh_discovery(device_id)
+    }
+
+    /// Executes an approved plan after repeating discovery and every P0 safety
+    /// check. The caller must type the full confirmation from `dry_run`.
+    pub fn execute(&self, device_id: &str, confirmation: &str) -> Result<RemovableDevice> {
+        let preview = self.plan_from_fresh_discovery(device_id)?;
+        if confirmation != preview.confirmation {
+            bail!("destructive confirmation does not match the selected device");
+        }
+        let final_plan = self.plan_from_fresh_discovery(device_id)?;
+        if device_fingerprint(&preview.device) != device_fingerprint(&final_plan.device) {
+            bail!("device identity changed after confirmation; aborting");
+        }
+        for operation in &final_plan.operations {
+            self.executor.execute(operation)?;
+        }
+        let verified = self.find_unique_device(device_id)?;
+        if device_fingerprint(&final_plan.device) != device_fingerprint(&verified) {
+            bail!("provisioning commands completed but device identity changed");
+        }
+        validate_provisioning_target(&verified)?;
+        Ok(verified)
+    }
+
+    fn plan_from_fresh_discovery(&self, device_id: &str) -> Result<ProvisioningPlan> {
         if device_id.trim() != device_id || device_id.is_empty() {
             bail!("invalid device identifier");
         }
-        let devices = self.source.discover()?;
-        let matches = devices
-            .into_iter()
-            .filter(|device| device.id == device_id)
-            .collect::<Vec<_>>();
-        let device = match matches.as_slice() {
-            [] => bail!("device is absent from fresh discovery; aborting"),
-            [device] => device.clone(),
-            _ => bail!("device identifier is ambiguous in fresh discovery; aborting"),
-        };
+        let device = self.find_unique_device(device_id)?;
         validate_provisioning_target(&device)?;
         Ok(ProvisioningPlan {
             operations: platform::provisioning_operations(&device)?,
@@ -123,6 +180,23 @@ impl<S: DeviceSource> Provisioner<S> {
             device,
         })
     }
+
+    fn find_unique_device(&self, device_id: &str) -> Result<RemovableDevice> {
+        let devices = self.source.discover()?;
+        let matches = devices
+            .into_iter()
+            .filter(|device| device.id == device_id)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => bail!("device is absent from fresh discovery; aborting"),
+            [device] => Ok(device.clone()),
+            _ => bail!("device identifier is ambiguous in fresh discovery; aborting"),
+        }
+    }
+}
+
+fn device_fingerprint(device: &RemovableDevice) -> (&str, &str, u64) {
+    (&device.id, &device.model, device.capacity_bytes)
 }
 
 fn validate_provisioning_target(device: &RemovableDevice) -> Result<()> {
@@ -146,6 +220,8 @@ fn validate_provisioning_target(device: &RemovableDevice) -> Result<()> {
 
 #[cfg(test)]
 mod provisioning_tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     #[derive(Clone)]
@@ -154,6 +230,23 @@ mod provisioning_tests {
     impl DeviceSource for FakeSource {
         fn discover(&self) -> Result<Vec<RemovableDevice>> {
             Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeExecutor {
+        calls: Arc<Mutex<Vec<PlannedOperation>>>,
+        fail_at: Option<usize>,
+    }
+
+    impl CommandExecutor for FakeExecutor {
+        fn execute(&self, operation: &PlannedOperation) -> Result<()> {
+            let mut calls = self.calls.lock().unwrap();
+            if self.fail_at == Some(calls.len()) {
+                bail!("simulated command failure");
+            }
+            calls.push(operation.clone());
+            Ok(())
         }
     }
 
@@ -218,5 +311,32 @@ mod provisioning_tests {
         assert!(Provisioner::new(FakeSource(vec![device(), device()]))
             .dry_run("/dev/sdb")
             .is_err());
+    }
+
+    #[test]
+    fn execution_requires_exact_confirmation_and_revalidates_before_commands() {
+        let source = FakeSource(vec![device()]);
+        let executor = FakeExecutor::default();
+        let calls = Arc::clone(&executor.calls);
+        let provisioner = Provisioner::with_executor(source, executor);
+        let plan = provisioner.dry_run("/dev/sdb").unwrap();
+        assert!(provisioner.execute("/dev/sdb", "ERASE").is_err());
+        assert!(calls.lock().unwrap().is_empty());
+
+        provisioner.execute("/dev/sdb", &plan.confirmation).unwrap();
+        assert_eq!(calls.lock().unwrap().len(), plan.operations.len());
+    }
+
+    #[test]
+    fn command_failure_aborts_remaining_operations() {
+        let executor = FakeExecutor {
+            fail_at: Some(1),
+            ..FakeExecutor::default()
+        };
+        let calls = Arc::clone(&executor.calls);
+        let provisioner = Provisioner::with_executor(FakeSource(vec![device()]), executor);
+        let plan = provisioner.dry_run("/dev/sdb").unwrap();
+        assert!(provisioner.execute("/dev/sdb", &plan.confirmation).is_err());
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }

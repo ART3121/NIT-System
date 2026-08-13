@@ -69,6 +69,7 @@ pub(crate) fn discover_devices() -> Result<Vec<RemovableDevice>> {
 
 pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<PlannedOperation>> {
     validate_linux_device_id(&device.id)?;
+    let partition = first_partition_path(&device.id)?;
     let mut operations = Vec::new();
     if !device.mount_points.is_empty() {
         operations.push(PlannedOperation {
@@ -96,18 +97,39 @@ pub(crate) fn provisioning_operations(device: &RemovableDevice) -> Result<Vec<Pl
                 "gpt".into(),
                 "mkpart".into(),
                 "primary".into(),
-                "0%".into(),
+                "1MiB".into(),
                 "100%".into(),
             ],
             destructive: true,
         },
         PlannedOperation {
+            program: "partprobe".into(),
+            arguments: vec![device.id.clone()],
+            destructive: false,
+        },
+        PlannedOperation {
+            program: "udevadm".into(),
+            arguments: vec!["settle".into(), "--timeout=10".into()],
+            destructive: false,
+        },
+        PlannedOperation {
             program: "mkfs.exfat".into(),
-            arguments: vec!["-n".into(), "NIT_DRIVE".into(), "<new-partition>".into()],
+            arguments: vec!["-n".into(), "NIT_DRIVE".into(), partition],
             destructive: true,
         },
     ]);
     Ok(operations)
+}
+
+fn first_partition_path(device_id: &str) -> Result<String> {
+    let name = device_id
+        .strip_prefix("/dev/")
+        .ok_or_else(|| anyhow::anyhow!("invalid Linux block device identifier"))?;
+    Ok(if name.starts_with("nvme") || name.starts_with("mmcblk") {
+        format!("{device_id}p1")
+    } else {
+        format!("{device_id}1")
+    })
 }
 
 fn validate_linux_device_id(id: &str) -> Result<()> {
