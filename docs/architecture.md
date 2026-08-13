@@ -77,13 +77,15 @@ No Agent starts for Plain. Existing usage remains unchanged.
 ### Unlock and Vault operations
 
 ```text
-nit -unlock <drive> <workspace-id>
+nit -unlock
   ├── start/reuse local Session Agent
+  ├── discover mounted NIT Drive
   ├── prompt password
   └── Agent
       ├── NitDrive::open
       ├── Vault::open + authenticate Drive binding
-      ├── Nit::open_vault(workspace-id)
+      ├── select unique workspace or return names for numbered selection
+      ├── Nit::open_vault(internal workspace-id)
       └── retain unlocked Nit in memory
 
 later nit text -n / nit -ls / nit -tui

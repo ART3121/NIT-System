@@ -15,13 +15,16 @@ use nit_core::{
     ACTIVE_TITLE, ARCHIVE_TITLE,
 };
 use nit_drive::{
-    discover_devices, InitializedDrive, NitDriveInitializer, Provisioner, RemovableDevice,
+    discover_devices, InitializedDrive, NitDrive, NitDriveInitializer, Provisioner, RemovableDevice,
 };
 use nit_editor as editor;
-use nit_session::{default_endpoint, SessionAgent, SessionClient, SessionStatus};
+use nit_session::{
+    default_endpoint, DriveUnlockOutcome, SessionAgent, SessionClient, SessionStatus,
+    SessionWorkspace,
+};
 use nit_tui as tui;
 use secrecy::SecretString;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 fn write_stdout(arguments: std::fmt::Arguments<'_>) -> Result<()> {
     match io::stdout().lock().write_fmt(arguments) {
@@ -66,8 +69,8 @@ enum Action {
     MigrateTimeless,
     DriveCreate(DriveCreateMode),
     Unlock {
-        vault: PathBuf,
-        workspace: VaultWorkspaceId,
+        drive: Option<PathBuf>,
+        workspace: Option<VaultWorkspaceId>,
     },
     Lock,
     SessionStatus,
@@ -148,13 +151,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
             no_arguments(remaining, Action::MigrateTimeless, "nit -migrate-timeless")
         }
         "-drive-create" => parse_drive_create(remaining),
-        "-unlock" => match remaining {
-            [vault, workspace] => Ok(Action::Unlock {
-                vault: PathBuf::from(vault),
-                workspace: workspace.parse()?,
-            }),
-            _ => bail!("usage: nit -unlock <drive-path> <workspace-id>"),
-        },
+        "-unlock" => parse_unlock(remaining),
         "-lock" => no_arguments(remaining, Action::Lock, "nit -lock"),
         "-session-status" => no_arguments(remaining, Action::SessionStatus, "nit -session-status"),
         "-v" => bail!("`nit -v` was removed in 0.4.0; use `nitcat <NOTE-ID>`"),
@@ -193,6 +190,24 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Action> {
             bail!("unknown command '{value}'; run 'nit -help' for usage")
         }
         _ => Ok(Action::Capture(arguments)),
+    }
+}
+
+fn parse_unlock(arguments: &[String]) -> Result<Action> {
+    match arguments {
+        [] => Ok(Action::Unlock {
+            drive: None,
+            workspace: None,
+        }),
+        [drive] => Ok(Action::Unlock {
+            drive: Some(PathBuf::from(drive)),
+            workspace: None,
+        }),
+        [drive, workspace] => Ok(Action::Unlock {
+            drive: Some(PathBuf::from(drive)),
+            workspace: Some(workspace.parse()?),
+        }),
+        _ => bail!("usage: nit -unlock [drive-path [workspace-id]]"),
     }
 }
 
@@ -387,12 +402,7 @@ fn execute(action: Action) -> Result<()> {
             Ok(())
         }
         Action::DriveCreate(mode) => create_nit_drive(mode),
-        Action::Unlock { vault, workspace } => {
-            let client = ensure_session_agent()?;
-            let password = rpassword::prompt_password("Vault password: ")?;
-            let status = client.unlock_drive(vault, workspace, password)?;
-            print_session_status(&status)
-        }
+        Action::Unlock { drive, workspace } => unlock_nit_drive(drive, workspace),
         Action::Lock => {
             let client = SessionClient::default();
             match client.lock() {
@@ -523,6 +533,102 @@ fn create_nit_drive(mode: DriveCreateMode) -> Result<()> {
     }
 }
 
+#[derive(Debug)]
+struct MountedDrive {
+    root: PathBuf,
+    model: String,
+    capacity_bytes: u64,
+}
+
+fn unlock_nit_drive(drive: Option<PathBuf>, workspace: Option<VaultWorkspaceId>) -> Result<()> {
+    let drive = match drive {
+        Some(drive) => drive,
+        None => select_mounted_drive(discover_mounted_drives()?)?,
+    };
+    let client = ensure_session_agent()?;
+    let mut password = Zeroizing::new(rpassword::prompt_password("Vault password: ")?);
+    if let Some(workspace) = workspace {
+        let status = client.unlock_drive(drive, workspace, std::mem::take(&mut *password))?;
+        return print_session_status(&status);
+    }
+    match client.unlock_drive_automatic(&drive, password.to_string())? {
+        DriveUnlockOutcome::Unlocked(status) => print_session_status(&status),
+        DriveUnlockOutcome::SelectWorkspace(workspaces) => {
+            let workspace = select_workspace(&workspaces)?;
+            let status =
+                client.unlock_drive(drive, workspace.id, std::mem::take(&mut *password))?;
+            print_session_status(&status)
+        }
+    }
+}
+
+fn discover_mounted_drives() -> Result<Vec<MountedDrive>> {
+    let mut drives = Vec::new();
+    for device in discover_devices()? {
+        if !device.removable || device.system_disk || device.read_only || device.is_ambiguous() {
+            continue;
+        }
+        for mount in &device.mount_points {
+            let Ok(drive) = NitDrive::open(mount) else {
+                continue;
+            };
+            if drives
+                .iter()
+                .any(|candidate: &MountedDrive| candidate.root == drive.root())
+            {
+                continue;
+            }
+            drives.push(MountedDrive {
+                root: drive.root().to_path_buf(),
+                model: device.model.clone(),
+                capacity_bytes: device.capacity_bytes,
+            });
+        }
+    }
+    Ok(drives)
+}
+
+fn select_mounted_drive(mut drives: Vec<MountedDrive>) -> Result<PathBuf> {
+    match drives.len() {
+        0 => bail!("no mounted NIT Drive found; connect and mount the device, then retry"),
+        1 => Ok(drives.remove(0).root),
+        _ => {
+            require_interactive_terminal()?;
+            println!("Mounted NIT Drives:\n");
+            for (index, drive) in drives.iter().enumerate() {
+                println!(
+                    "  {}. {} · {}",
+                    index + 1,
+                    drive.model,
+                    human_capacity(drive.capacity_bytes)
+                );
+            }
+            let selected = prompt_selection("Select a Drive", drives.len())?;
+            Ok(drives.remove(selected).root)
+        }
+    }
+}
+
+fn select_workspace(workspaces: &[SessionWorkspace]) -> Result<&SessionWorkspace> {
+    require_interactive_terminal()?;
+    println!("This NIT Drive contains multiple workspaces:\n");
+    for (index, workspace) in workspaces.iter().enumerate() {
+        println!("  {}. {}", index + 1, workspace.name);
+    }
+    let selected = prompt_selection("Select a workspace", workspaces.len())?;
+    Ok(&workspaces[selected])
+}
+
+fn prompt_selection(label: &str, count: usize) -> Result<usize> {
+    let value = prompt_line(&format!("\n{label} [1-{count}]: "))?;
+    let selected = value
+        .parse::<usize>()
+        .ok()
+        .filter(|selected| (1..=count).contains(selected))
+        .ok_or_else(|| anyhow::anyhow!("invalid selection"))?;
+    Ok(selected - 1)
+}
+
 fn print_discovered_devices(devices: &[RemovableDevice]) -> Result<()> {
     println!("Discovered physical devices:\n");
     if devices.is_empty() {
@@ -575,12 +681,10 @@ fn print_provisioning_plan(plan: &nit_drive::ProvisioningPlan) -> Result<()> {
 
 fn print_initialized_drive(initialized: &InitializedDrive) -> Result<()> {
     println!(
-        "\nNIT Drive ready.\nDrive: {}\nMount: {}\nWorkspace: {} ({})\n\nUnlock it with:\nnit -unlock {} {}",
+        "\nNIT Drive ready.\nDrive: {}\nMount: {}\nWorkspace: {} ({})\n\nUnlock it with:\nnit -unlock",
         initialized.drive.id(),
         initialized.drive.root().display(),
         initialized.workspace.name,
-        initialized.workspace.id,
-        initialized.drive.root().display(),
         initialized.workspace.id
     );
     Ok(())
@@ -1017,7 +1121,8 @@ Usage:
   nit -drive-create <device-id>            Prepare one explicitly named device
   nit -drive-create --initialize <device-id> <mount-path>
                                            Finish a formatted, mounted device
-  nit -unlock <drive-path> <workspace-id>  Unlock a NIT Drive session
+  nit -unlock                              Find and unlock a mounted NIT Drive
+  nit -unlock <drive-path> [workspace-id]  Advanced explicit unlock
   nit -lock                                Lock the active Vault session
   nit -session-status                      Show Vault session state
   nit -ai-roadmap <ID>                     Generate a local AI Roadmap
@@ -1120,8 +1225,22 @@ mod tests {
             ]))
             .unwrap(),
             Action::Unlock {
-                vault: PathBuf::from("/media/user/NIT/vault"),
-                workspace,
+                drive: Some(PathBuf::from("/media/user/NIT/vault")),
+                workspace: Some(workspace),
+            }
+        );
+        assert_eq!(
+            parse_arguments(words(&["-unlock"])).unwrap(),
+            Action::Unlock {
+                drive: None,
+                workspace: None,
+            }
+        );
+        assert_eq!(
+            parse_arguments(words(&["-unlock", "/media/user/NIT"])).unwrap(),
+            Action::Unlock {
+                drive: Some(PathBuf::from("/media/user/NIT")),
+                workspace: None,
             }
         );
         assert_eq!(parse_arguments(words(&["-lock"])).unwrap(), Action::Lock);
@@ -1177,6 +1296,18 @@ mod tests {
         );
         device.mount_points.push(PathBuf::from("/mnt/NIT"));
         assert!(unique_mount_point(&device).is_err());
+    }
+
+    #[test]
+    fn automatic_unlock_accepts_one_drive_without_exposing_its_path() {
+        assert!(select_mounted_drive(Vec::new()).is_err());
+        let root = select_mounted_drive(vec![MountedDrive {
+            root: PathBuf::from("/run/media/user/NIT_DRIVE"),
+            model: "Test USB".into(),
+            capacity_bytes: 8 * 1024 * 1024 * 1024,
+        }])
+        .unwrap();
+        assert_eq!(root, PathBuf::from("/run/media/user/NIT_DRIVE"));
     }
 
     #[test]

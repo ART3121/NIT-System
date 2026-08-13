@@ -453,14 +453,14 @@ behavior remain exactly the same.
 Unlock a mounted NIT Drive:
 
 ```bash
-nit -unlock /media/user/NIT_DRIVE 0123456789abcdef0123456789abcdef
+nit -unlock
 ```
 
-On Windows:
-
-```powershell
-nit -unlock E:\ 0123456789abcdef0123456789abcdef
-```
+The CLI finds mounted NIT Drives automatically. If exactly one Drive and one
+workspace exist, only the password is requested. Multiple candidates are shown
+by device model or workspace name for numbered selection. Paths and internal
+workspace IDs are not part of the normal workflow; the advanced form remains
+`nit -unlock <drive-path> [workspace-id]`.
 
 The command prompts for the password and starts/reuses a local Session Agent.
 Subsequent CLI and TUI operations use that Vault without asking again:
@@ -545,7 +545,8 @@ Use `nit -ls` and `nit -show` to invoke those operations.
 | `nit -migrate-timeless` | Convert legacy timed Note and Item IDs safely |
 | `nit -drive-create [<device-id>]` | Interactively prepare a removable device as a NIT Drive |
 | `nit -drive-create --dry-run <device-id>` | Validate and preview provisioning without mutation |
-| `nit -unlock <drive-path> <workspace-id>` | Unlock a NIT Drive for shared CLI/TUI use |
+| `nit -unlock` | Find and unlock a NIT Drive for shared CLI/TUI use |
+| `nit -unlock <drive-path> [workspace-id]` | Advanced explicit Drive/workspace selection |
 | `nit -session-status` | Show locked, unlocked, unavailable, or absent Agent state |
 | `nit -lock` | Destroy the active Vault session and discard its key |
 
@@ -1181,7 +1182,7 @@ nit -init
 ```
 
 NIT never creates storage during capture, listing, or TUI startup. For Vault,
-mount the Drive and use `nit -unlock <drive-path> <workspace-id>`.
+mount the Drive and use `nit -unlock`.
 
 ### Entries do not appear
 
@@ -1207,7 +1208,7 @@ nit -session-status
 Reconnect and mount the same Drive, then unlock it again:
 
 ```bash
-nit -unlock /media/user/NIT_DRIVE <workspace-id>
+nit -unlock
 ```
 
 Reinsertion never reuses the previous key. NIT intentionally refuses a local
@@ -1215,9 +1216,8 @@ Reinsertion never reuses the previous key. NIT intentionally refuses a local
 
 ### Vault unlock fails
 
-Confirm that the supplied path is the mounted root containing `.nit-drive/`,
-not the internal `.nit-drive/vault/` directory. Then verify the password and
-workspace ID. Incorrect passwords, changed Drive headers, mismatched bindings,
+Confirm that the Drive is mounted and contains `.nit-drive/`. Then verify the
+password. Incorrect passwords, changed Drive headers, mismatched bindings,
 corrupt authenticated records, and unsupported versions all fail closed.
 
 ### `-edit` is rejected for a Vault entry

@@ -30,15 +30,16 @@ migration remain separate administrative operations.
 ## Vault session commands
 
 ```bash
-nit -unlock <drive-path> <workspace-id>
+nit -unlock
 nit -session-status
 nit -lock
 ```
 
-`-unlock` expects the mounted NIT Drive root, not its internal Vault directory.
-The CLI starts the Session Agent on demand, prompts without echoing the password,
-opens the Drive, authenticates its Vault binding, and selects the supplied
-32-character workspace ID.
+`-unlock` discovers mounted NIT Drives. A unique Drive and workspace are selected
+automatically; multiple candidates are shown as a numbered list using device
+models and workspace names. The CLI starts the Session Agent on demand and
+prompts without echoing the password. Paths and 32-character IDs are optional
+advanced arguments: `nit -unlock <drive-path> [workspace-id]`.
 
 After unlock, normal commands and `nit -tui` reuse the same session:
 
@@ -83,7 +84,8 @@ it still reports a locked state. `nit -session-status` reports:
 | `nit -drive-create` | Discover, explicitly select, format, and initialize a NIT Drive |
 | `nit -drive-create --dry-run <device-id>` | Preview a validated plan without running commands |
 | `nit -drive-create --initialize <device-id> <mount>` | Initialize formatted and mounted media without reformatting |
-| `nit -unlock <drive> <workspace-id>` | Unlock/reuse a NIT Drive session |
+| `nit -unlock` | Discover and unlock a mounted NIT Drive |
+| `nit -unlock <drive> [workspace-id]` | Advanced explicit Drive/workspace selection |
 | `nit -lock` | Destroy the active Vault session |
 | `nit -session-status` | Inspect session state |
 | `nit -ai-roadmap <ID>` | Generate and review a local Roadmap |

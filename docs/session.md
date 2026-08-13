@@ -107,12 +107,15 @@ fallback. Frontends may retain an unsaved draft only in their own memory.
 ## Commands and integration
 
 ```bash
-nit -unlock <drive-root> <workspace-id>
+nit -unlock
 nit -session-status
 nit -lock
 ```
 
 The CLI starts the same `nit` executable in its hidden Agent mode when needed.
+It discovers the mounted Drive and the Agent selects a unique workspace. When
+there are multiple candidates, the CLI presents numbered device/workspace names.
+`nit -unlock <drive-root> [workspace-id]` remains an advanced explicit form.
 Desktop integrations should reuse `SessionClient` and `NitApi`, not duplicate
 Vault opening or Session logic.
 

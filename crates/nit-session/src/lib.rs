@@ -29,7 +29,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 mod transport;
 
-const PROTOCOL_VERSION: u16 = 1;
+const PROTOCOL_VERSION: u16 = 2;
 const MAX_MESSAGE_BYTES: usize = 128 * 1024 * 1024 + 1024 * 1024;
 
 /// Public session state returned without exposing key material or plaintext.
@@ -42,6 +42,18 @@ pub enum SessionStatus {
         workspace_name: String,
     },
     Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkspace {
+    pub id: VaultWorkspaceId,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DriveUnlockOutcome {
+    Unlocked(SessionStatus),
+    SelectWorkspace(Vec<SessionWorkspace>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,6 +71,11 @@ enum Request {
         protocol: u16,
         drive_root: PathBuf,
         workspace_id: String,
+        password: String,
+    },
+    UnlockDriveAutomatic {
+        protocol: u16,
+        drive_root: PathBuf,
         password: String,
     },
     Lock {
@@ -131,6 +148,7 @@ impl Request {
             Self::Status { protocol }
             | Self::Unlock { protocol, .. }
             | Self::UnlockDrive { protocol, .. }
+            | Self::UnlockDriveAutomatic { protocol, .. }
             | Self::Lock { protocol }
             | Self::Shutdown { protocol }
             | Self::Load { protocol, .. }
@@ -147,11 +165,21 @@ impl Request {
             | Self::AttachRoadmap { protocol, .. } => *protocol,
         }
     }
+
+    fn zeroize_secrets(&mut self) {
+        match self {
+            Self::Unlock { password, .. }
+            | Self::UnlockDrive { password, .. }
+            | Self::UnlockDriveAutomatic { password, .. } => password.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
     Session(SessionStatus),
+    Workspaces(Vec<SessionWorkspace>),
     Notes(Notes),
     All(Notes, Notes),
     NitStatus(NitStatus),
@@ -301,6 +329,37 @@ impl AgentState {
             drive.root().join(".nit-drive/header"),
             workspace_id,
         )
+    }
+
+    fn unlock_drive_automatic(
+        &mut self,
+        drive_root: &Path,
+        password: SecretString,
+    ) -> Result<DriveUnlockOutcome> {
+        let drive = NitDrive::open(drive_root)?;
+        let vault = drive.unlock(&password)?;
+        drop(password);
+        let workspaces = Nit::vault_workspaces(&vault)?;
+        match workspaces.as_slice() {
+            [] => bail!("NIT Drive has no workspaces"),
+            [workspace] => self
+                .activate(
+                    vault,
+                    drive.root(),
+                    drive.root().join(".nit-drive/header"),
+                    &workspace.id.to_string(),
+                )
+                .map(DriveUnlockOutcome::Unlocked),
+            _ => Ok(DriveUnlockOutcome::SelectWorkspace(
+                workspaces
+                    .into_iter()
+                    .map(|workspace| SessionWorkspace {
+                        id: workspace.id,
+                        name: workspace.name,
+                    })
+                    .collect(),
+            )),
+        }
     }
 
     fn activate(
@@ -471,6 +530,27 @@ impl SessionClient {
         }
     }
 
+    pub fn unlock_drive_automatic(
+        &self,
+        drive_root: impl Into<PathBuf>,
+        mut password: String,
+    ) -> Result<DriveUnlockOutcome> {
+        let request = Request::UnlockDriveAutomatic {
+            protocol: PROTOCOL_VERSION,
+            drive_root: drive_root.into(),
+            password: std::mem::take(&mut password),
+        };
+        password.zeroize();
+        match self.call(request)? {
+            Reply::Session(status) => {
+                self.clear_snapshots()?;
+                Ok(DriveUnlockOutcome::Unlocked(status))
+            }
+            Reply::Workspaces(workspaces) => Ok(DriveUnlockOutcome::SelectWorkspace(workspaces)),
+            _ => bail!("invalid NIT Session automatic Drive unlock response"),
+        }
+    }
+
     pub fn lock(&self) -> Result<SessionStatus> {
         match self.call(Request::Lock {
             protocol: PROTOCOL_VERSION,
@@ -493,9 +573,17 @@ impl SessionClient {
         }
     }
 
-    fn call(&self, request: Request) -> Result<Reply> {
-        let mut connection = transport::connect(&self.endpoint)?;
-        write_message(&mut connection, &request)?;
+    fn call(&self, mut request: Request) -> Result<Reply> {
+        let mut connection = match transport::connect(&self.endpoint) {
+            Ok(connection) => connection,
+            Err(error) => {
+                request.zeroize_secrets();
+                return Err(error);
+            }
+        };
+        let written = write_message(&mut connection, &request);
+        request.zeroize_secrets();
+        written?;
         let response: Response = read_message(&mut connection)?;
         if response.protocol != PROTOCOL_VERSION {
             bail!("incompatible NIT Session Agent protocol");
@@ -734,6 +822,21 @@ fn handle_request(state: &mut AgentState, mut request: Request) -> Response {
                 .unlock_drive(drive_root, workspace_id, secret)
                 .map(Reply::Session)
         }
+        Request::UnlockDriveAutomatic {
+            drive_root,
+            password,
+            ..
+        } => {
+            let secret = SecretString::from(std::mem::take(password));
+            state
+                .unlock_drive_automatic(drive_root, secret)
+                .map(|outcome| match outcome {
+                    DriveUnlockOutcome::Unlocked(status) => Reply::Session(status),
+                    DriveUnlockOutcome::SelectWorkspace(workspaces) => {
+                        Reply::Workspaces(workspaces)
+                    }
+                })
+        }
         Request::Lock { .. } | Request::Shutdown { .. } => Ok(Reply::Session(state.lock())),
         Request::Load { view, .. } => state.with_nit(|nit| nit.load(*view)).map(Reply::Notes),
         Request::Save {
@@ -863,7 +966,7 @@ pub fn default_endpoint() -> String {
         .map(char::from)
         .collect::<String>();
     format!(
-        "nit-system-session-v1-{}",
+        "nit-system-session-v2-{}",
         if user.is_empty() { "user" } else { &user }
     )
 }
@@ -1070,7 +1173,7 @@ mod tests {
     fn unlocks_a_versioned_nit_drive_and_serves_domain_operations() {
         let temp = tempfile::tempdir().unwrap();
         let password = SecretString::from("password".to_owned());
-        let initialized = NitDriveInitializer::new(FakeDriveSource(RemovableDevice {
+        let _initialized = NitDriveInitializer::new(FakeDriveSource(RemovableDevice {
             id: "/dev/test".into(),
             model: "Test Drive".into(),
             capacity_bytes: 1024 * 1024 * 1024,
@@ -1086,13 +1189,63 @@ mod tests {
         let client = SessionClient::new(&endpoint).unwrap();
         wait_for_agent(&client);
 
-        client
-            .unlock_drive(temp.path(), initialized.workspace.id, "password".into())
-            .unwrap();
+        assert!(matches!(
+            client
+                .unlock_drive_automatic(temp.path(), "password".into())
+                .unwrap(),
+            DriveUnlockOutcome::Unlocked(SessionStatus::Unlocked { .. })
+        ));
         let id = NitApi::create(&client, Kind::Note, None, "On drive".into()).unwrap();
         assert_eq!(id.to_string(), "N-0001");
         client.shutdown_agent().unwrap();
         handle.join().unwrap();
         assert!(!temp.path().join(".nit").exists());
+    }
+
+    #[test]
+    fn automatic_drive_unlock_returns_named_choice_for_multiple_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let password = SecretString::from("password".to_owned());
+        let initialized = NitDriveInitializer::new(FakeDriveSource(RemovableDevice {
+            id: "/dev/test".into(),
+            model: "Test Drive".into(),
+            capacity_bytes: 1024 * 1024 * 1024,
+            mount_points: vec![temp.path().to_path_buf()],
+            removable: true,
+            system_disk: false,
+            read_only: false,
+        }))
+        .initialize("/dev/test", temp.path(), &password, "Personal")
+        .unwrap();
+        let vault = initialized.drive.unlock(&password).unwrap();
+        let work = Nit::create_vault_workspace(&vault, "Work").unwrap();
+        drop(vault);
+
+        let endpoint = endpoint();
+        let handle = start_agent(&endpoint);
+        let client = SessionClient::new(&endpoint).unwrap();
+        wait_for_agent(&client);
+        let DriveUnlockOutcome::SelectWorkspace(workspaces) = client
+            .unlock_drive_automatic(temp.path(), "password".into())
+            .unwrap()
+        else {
+            panic!("multiple workspaces must require a human selection");
+        };
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Personal", "Work"]
+        );
+        assert_eq!(client.status().unwrap(), SessionStatus::Locked);
+        assert!(matches!(
+            client
+                .unlock_drive(temp.path(), work.id, "password".into())
+                .unwrap(),
+            SessionStatus::Unlocked { workspace_name, .. } if workspace_name == "Work"
+        ));
+        client.shutdown_agent().unwrap();
+        handle.join().unwrap();
     }
 }

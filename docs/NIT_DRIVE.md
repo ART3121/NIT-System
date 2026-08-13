@@ -37,10 +37,21 @@ Workspace names, entries, IDs, Roadmaps, and sequences remain ciphertext.
 ## Opening and unlocking
 
 ```bash
-nit -unlock <mounted-drive-root> <workspace-id>
+nit -unlock
 ```
 
-The path must identify the mounted root containing `.nit-drive`, not
+The CLI discovers mounted removable devices and recognizes valid NIT Drive
+roots. One Drive and one workspace are selected automatically. If several
+Drives or workspaces exist, the CLI presents their models or names as a numbered
+choice. Users do not need to type a mount path or remember an internal ID.
+
+The explicit form remains available for scripts and diagnostics:
+
+```bash
+nit -unlock <mounted-drive-root> [workspace-id]
+```
+
+The explicit path must identify the mounted root containing `.nit-drive`, not
 `.nit-drive/vault`. `NitDrive::open` validates the version, IDs, fixed relative
 layout, file sizes, and symlink constraints before a password is used.
 
@@ -52,10 +63,10 @@ fallback or sync copy.
 ## Multiple workspaces
 
 One Vault can contain several independent workspaces. Each has a random stable
-`VaultWorkspaceId`; drive letters and mount paths are never identities. The
-current CLI unlock command needs this ID. `Nit::vault_workspaces(&vault)` and
-the initialized Drive result expose IDs to Rust integrations responsible for
-workspace selection.
+`VaultWorkspaceId`; drive letters and mount paths are never identities. Normal
+CLI selection is by human-readable workspace name and number. The ID remains an
+internal identity and an optional advanced CLI argument. `Nit::vault_workspaces`
+and the initialized Drive result expose it to Rust integrations.
 
 ## Device discovery
 
